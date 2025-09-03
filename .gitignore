@@ -11,3 +11,6 @@ vars.tfvars
 terraform.tfvars
 plan.json
 application_default_credentials.json
+
+# local temp state snapshots
+state*.json
