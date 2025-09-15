@@ -30,7 +30,7 @@ jobs:
         with:
           terraform_version: "1.8.5"
 
-      # optional: remove stuck lock in GCS (like in create)
+      # best-effort: remove stuck Terraform lock in GCS
       - name: Clear stale Terraform lock (best-effort)
         shell: bash
         run: |
@@ -44,9 +44,11 @@ jobs:
           fi
           gsutil rm -f "${LOCK_PATH}" || true
 
-      - name: Terraform Destroy
+      # 1) Trying normal destroy via Terraform
+      - name: Terraform Destroy (try)
+        id: tf_destroy
+        continue-on-error: true
         env:
-          # according to variables.tf
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
           TF_VAR_region:       ${{ secrets.GCP_REGION }}
           TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
@@ -59,5 +61,47 @@ jobs:
           TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
           GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
         run: |
+          set -e
           terraform init -input=false
           terraform destroy -input=false -lock-timeout=10m -auto-approve
+
+      # 2) fallback: if failed with "Provider configuration not present" (legacy module.gke)
+      - name: Legacy destroy fallback (gcloud + state rm)
+        if: steps.tf_destroy.outcome == 'failure'
+        env:
+          PROJECT_ID:          ${{ secrets.GCP_PROJECT_ID }}
+          REGION:              ${{ secrets.GCP_REGION }}
+          CLUSTER_NAME:        gke-flux
+        run: |
+          set -euxo pipefail
+          echo "Terraform destroy failed — running legacy cleanup..."
+          # видаляємо кластер напряму, якщо існує
+          gcloud container clusters delete "${CLUSTER_NAME}" --region "${REGION}" --project "${PROJECT_ID}" --quiet || true
+
+          # чистимо зі стейту всі старі адреси module.gke.*
+          terraform init -input=false
+          mapfile -t LEGACY < <(terraform state list | sed -n 's/^\(module\.gke\..*\)$/\1/p' || true)
+          if [ "${#LEGACY[@]}" -gt 0 ]; then
+            for addr in "${LEGACY[@]}"; do
+              echo "Removing legacy state: $addr"
+              terraform state rm "$addr" || true
+            done
+          fi
+
+      # 3) safety re-destroy (will remove the rest — deploy key, local_file, etc.)
+      - name: Terraform Destroy (final pass)
+        if: always()
+        env:
+          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:       ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name: gke-flux
+          TF_VAR_github_owner: mexxo-dvp
+          TF_VAR_github_repo:  gitops
+          TF_VAR_flux_path:    clusters/gke
+          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
+        run: |
+          set -e
+          terraform init -input=false
+          terraform destroy -input=false -lock-timeout=10m -auto-approve || true
