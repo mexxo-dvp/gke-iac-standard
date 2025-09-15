@@ -38,14 +38,6 @@ jobs:
         with:
           terraform_version: "1.8.5"
 
-      - name: Export env to GITHUB_ENV
-        run: |
-          echo "GOOGLE_PROJECT=${{ secrets.GCP_PROJECT_ID }}"  >> "$GITHUB_ENV"
-          echo "GOOGLE_REGION=${{ secrets.GCP_REGION }}"       >> "$GITHUB_ENV"
-          echo "GOOGLE_ZONE=${{ secrets.GCP_ZONE }}"           >> "$GITHUB_ENV"
-          echo "CLUSTER_NAME=gke-flux"                         >> "$GITHUB_ENV"
-          echo "GH_TOKEN=${{ secrets.GH_TOKEN }}"              >> "$GITHUB_ENV"
-
       - name: Where am I?
         run: |
           pwd; ls -la
@@ -53,32 +45,26 @@ jobs:
 
       - name: Terraform Plan/Apply
         env:
-          TF_VAR_project_id:   ${{ env.GOOGLE_PROJECT }}
-          TF_VAR_region:       ${{ env.GOOGLE_REGION }}
-          TF_VAR_zone:         ${{ env.GOOGLE_ZONE }}
-          TF_VAR_cluster_name: ${{ env.CLUSTER_NAME }}
+          # базові змінні для створення кластера
+          TF_VAR_project_id:         ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:             ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:               ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name:       gke-flux
+
+          # ↓↓↓ важливо: змінні для модуля flux_bootstrap_gke, щоб TF не чекав вводу
+          TF_VAR_github_owner:       mexxo-dvp
+          TF_VAR_github_repository:  gitops
+          TF_VAR_flux_path:          clusters/gke
+          TF_VAR_github_token:       ${{ secrets.GH_TOKEN }}
+
+          # для провайдера integrations/github
+          GITHUB_TOKEN:              ${{ secrets.GH_TOKEN }}
         run: |
           if [ "${{ inputs.apply }}" = "true" ]; then
-            terraform init
-            terraform apply -auto-approve
+            terraform init -input=false
+            terraform apply -input=false -auto-approve
           else
-            terraform init -backend=false
+            terraform init -backend=false -input=false
             terraform validate
-            terraform plan -no-color
+            terraform plan -no-color -input=false
           fi
-
-      - name: Flux bootstrap (GitHub)
-        env:
-          GITHUB_TOKEN:   ${{ env.GH_TOKEN }}
-          GOOGLE_PROJECT: ${{ env.GOOGLE_PROJECT }}
-          GOOGLE_REGION:  ${{ env.GOOGLE_REGION }}
-          CLUSTER_NAME:   ${{ env.CLUSTER_NAME }}
-        run: |
-          if [ -z "${GITHUB_TOKEN}" ]; then
-            echo "GH_TOKEN is empty — skipping Flux bootstrap"
-            exit 0
-          fi
-          gcloud container clusters get-credentials "${CLUSTER_NAME}" --region "${GOOGLE_REGION}" --project "${GOOGLE_PROJECT}"
-          curl -s https://fluxcd.io/install.sh | sudo bash
-          flux check --pre
-          flux bootstrap github --owner=mexxo-dvp --repository=gitops --branch=main --path=clusters/gke --personal
