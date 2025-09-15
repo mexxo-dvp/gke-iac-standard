@@ -24,6 +24,7 @@ concurrency:
 jobs:
   create:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,6 +37,8 @@ jobs:
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'gke-gcloud-auth-plugin'
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -44,13 +47,19 @@ jobs:
 
       - name: Terraform Plan/Apply
         env:
-          TF_VAR_project:       ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:        ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:          ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name:  gke-flux
-          TF_VAR_github_owner:  mexxo-dvp
-          TF_VAR_github_repo:   gitops
-          TF_VAR_flux_path:     clusters/gke
+          # GitHub provider needs PAT with scopes: repo + admin:public_key
+          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
+
+          # TF variables
+          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:       ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name: gke-flux
+
+          # For github provider/module inputs used by your TF
+          TF_VAR_github_owner: mexxo-dvp
+          TF_VAR_github_repo:  gitops
+          TF_VAR_flux_path:    clusters/gke
         run: |
           if [ "${{ inputs.apply }}" = "true" ]; then
             terraform init -input=false
@@ -69,9 +78,14 @@ jobs:
           GOOGLE_REGION:  ${{ secrets.GCP_REGION }}
           CLUSTER_NAME:   gke-flux
         run: |
+          # kube-context
           gcloud container clusters get-credentials "$CLUSTER_NAME" --region "$GOOGLE_REGION" --project "$GOOGLE_PROJECT"
+
+          # flux cli
           curl -s https://fluxcd.io/install.sh | sudo bash
           flux check --pre
+
+          # GitOps bootstrap до репо mexxo-dvp/gitops, гілка main, шлях clusters/gke
           flux bootstrap github \
             --owner=mexxo-dvp \
             --repository=gitops \
@@ -79,6 +93,5 @@ jobs:
             --path=clusters/gke \
             --personal \
             --token-auth
-          # first sync (optional)
           flux reconcile source git flux-system -n flux-system
           flux reconcile kustomization flux-system -n flux-system --with-source
