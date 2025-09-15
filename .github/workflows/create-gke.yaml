@@ -1,0 +1,52 @@
+name: Create GKE + Flux
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # required for flux bootstrap (commits in gitops)
+
+env:
+  GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+  GOOGLE_REGION:  ${{ secrets.GCP_REGION }}
+  GOOGLE_ZONE:    ${{ secrets.GCP_ZONE }}
+  CLUSTER_NAME:   gke-flux
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          export_environment_variables: true
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.8.5
+
+      - name: Terraform Init & Apply
+        env:
+          TF_VAR_project_id: ${{ env.GOOGLE_PROJECT }}
+          TF_VAR_region:     ${{ env.GOOGLE_REGION }}
+          TF_VAR_zone:       ${{ env.GOOGLE_ZONE }}
+          TF_VAR_cluster_name: ${{ env.CLUSTER_NAME }}
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+      # Flux
+      - name: Flux bootstrap (GitHub)
+        if: ${{ secrets.GH_TOKEN != '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          gcloud container clusters get-credentials "${{ env.CLUSTER_NAME }}" --region "${{ env.GOOGLE_REGION }}" --project "${{ env.GOOGLE_PROJECT }}"
+          curl -s https://fluxcd.io/install.sh | sudo bash
+          flux check --pre
+          flux bootstrap github --owner=mexxo-dvp --repository=gitops --branch=main --path=clusters/gke --personal

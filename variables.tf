@@ -1,34 +1,66 @@
-variable "GOOGLE_PROJECT" {
-  type    = string
-  default = "civil-pattern-466501-m8"
+#############################
+# infra/gke/variables.tf
+#############################
+
+variable "project" {
+  type        = string
+  description = "GCP Project ID (e.g., civil-pattern-466501-m8)"
 }
 
-variable "GOOGLE_REGION" {
-  type    = string
-  default = "europe-west1"
+variable "region" {
+  type        = string
+  description = "GCP region (e.g., europe-west1)"
+  default     = "europe-west1"
 }
 
-variable "GOOGLE_LOCATION" {
-  type    = string
-  default = "europe-west1-b"
+variable "location" {
+  type        = string
+  description = "GKE location: use ZONE for zonal cluster (e.g., europe-west1-b)"
+  default     = "europe-west1-b"
 }
 
-variable "GKE_CLUSTER_NAME" {
-  type    = string
-  default = "main"
+variable "cluster_name" {
+  type        = string
+  description = "Name of the GKE cluster"
+  default     = "gke-flux"
 }
 
-variable "GKE_POOL_NAME" {
-  type    = string
-  default = "main"
+variable "pool_name" {
+  type        = string
+  description = "Name of the node pool"
+  default     = "default-pool"
 }
 
-variable "GKE_MACHINE_TYPE" {
-  type    = string
-  default = "g1-small"
+variable "node_count" {
+  type        = number
+  description = "Number of nodes in the pool"
+  default     = 1
 }
 
-variable "GKE_NUM_NODES" {
-  type    = number
-  default = 1
+variable "machine_type" {
+  type        = string
+  description = "Machine type for GKE nodes"
+  default     = "e2-standard-2"
+}
+
+variable "github_owner" {
+  type        = string
+  description = "GitHub owner/org (e.g., mexxo-dvp)"
+}
+
+variable "github_repo" {
+  type        = string
+  description = "GitHub repository name (e.g., sentinel-bot)"
+}
+
+variable "github_token" {
+  type        = string
+  description = "GitHub PAT (Classic) with repo + admin:public_key scopes"
+  sensitive   = true
+}
+
+variable "target_path" {
+  type        = string
+  description = "Path in the GitHub repository where Flux manifests will be stored (e.g., apps/)"
+  default     = "apps/"
 }
