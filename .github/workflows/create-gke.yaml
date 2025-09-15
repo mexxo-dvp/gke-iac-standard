@@ -43,28 +43,44 @@ jobs:
           pwd; ls -la
           find . -maxdepth 2 -name "*.tf" -print
 
+      # best-effort: remove stuck lock in GCS according to backend.tf
+      - name: Clear stale Terraform lock (best-effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUCKET=$(grep -E 'bucket *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/')
+          PREFIX=$(grep -E 'prefix *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          echo "Backend bucket: ${BUCKET}"
+          echo "Backend prefix: ${PREFIX:-<none>}"
+          if [[ -n "${PREFIX:-}" ]]; then
+            LOCK_PATH="gs://${BUCKET}/${PREFIX}/default.tflock"
+          else
+            LOCK_PATH="gs://${BUCKET}/default.tflock"
+          fi
+          gsutil rm -f "${LOCK_PATH}" || true
+
       - name: Terraform Plan/Apply
         env:
-          # базові змінні для створення кластера
+          # basic variables for creating a cluster
           TF_VAR_project_id:         ${{ secrets.GCP_PROJECT_ID }}
           TF_VAR_region:             ${{ secrets.GCP_REGION }}
           TF_VAR_zone:               ${{ secrets.GCP_ZONE }}
           TF_VAR_cluster_name:       gke-flux
 
-          # ↓↓↓ важливо: змінні для модуля flux_bootstrap_gke, щоб TF не чекав вводу
+          # variables for the flux_bootstrap_gke module (so that TF does not wait for input)
           TF_VAR_github_owner:       mexxo-dvp
           TF_VAR_github_repository:  gitops
           TF_VAR_flux_path:          clusters/gke
           TF_VAR_github_token:       ${{ secrets.GH_TOKEN }}
 
-          # для провайдера integrations/github
+          # for provider integrations/github
           GITHUB_TOKEN:              ${{ secrets.GH_TOKEN }}
         run: |
           if [ "${{ inputs.apply }}" = "true" ]; then
             terraform init -input=false
-            terraform apply -input=false -auto-approve
+            terraform apply -input=false -lock-timeout=10m -auto-approve
           else
             terraform init -backend=false -input=false
             terraform validate
-            terraform plan -no-color -input=false
+            terraform plan -no-color -input=false -lock-timeout=10m
           fi
