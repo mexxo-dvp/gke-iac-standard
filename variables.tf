@@ -50,9 +50,3 @@ variable "flux_path" {
   description = "Path in the GitOps repo for cluster manifests"
   default     = "clusters/gke"
 }
-
-variable "enable_flux_bootstrap" {
-  type        = bool
-  description = "Run Flux bootstrap from Terraform (first-time only). Default=false — use CLI-bootstrap in CI."
-  default     = false
-}
