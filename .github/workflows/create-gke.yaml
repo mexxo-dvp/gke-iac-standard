@@ -1,10 +1,15 @@
-name: Create GKE + Flux
+name: Create GKE + Flux (CLI)
 
 on:
   workflow_dispatch:
     inputs:
       apply:
         description: "Run terraform apply? (false = plan only)"
+        required: true
+        type: boolean
+        default: true
+      bootstrap:
+        description: "Run Flux CLI bootstrap after apply?"
         required: true
         type: boolean
         default: true
@@ -19,9 +24,6 @@ concurrency:
 jobs:
   create:
     runs-on: ubuntu-latest
-    env:
-      TF_IN_AUTOMATION: "1"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,47 +42,44 @@ jobs:
         with:
           terraform_version: "1.8.5"
 
-      - name: Where am I?
-        run: |
-          pwd; ls -la
-          find . -maxdepth 2 -name "*.tf" -print
-
-      # best-effort: remove the stuck lock in GCS according to backend.tf
-      - name: Clear stale Terraform lock (best-effort)
-        shell: bash
-        run: |
-          set -euo pipefail
-          BUCKET=$(grep -E 'bucket *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/')
-          PREFIX=$(grep -E 'prefix *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/' || true)
-          echo "Backend bucket: ${BUCKET}"
-          echo "Backend prefix: ${PREFIX:-<none>}"
-          if [[ -n "${PREFIX:-}" ]]; then
-            LOCK_PATH="gs://${BUCKET}/${PREFIX}/default.tflock"
-          else
-            LOCK_PATH="gs://${BUCKET}/default.tflock"
-          fi
-          gsutil rm -f "${LOCK_PATH}" || true
-
       - name: Terraform Plan/Apply
         env:
-          # matching names from variables.tf
-          TF_VAR_project:              ${{ secrets.GCP_PROJECT_ID }}   # was project_id, needed project
-          TF_VAR_region:               ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:                 ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name:         gke-flux
-
-          # for Flux module and GitHub provider
-          TF_VAR_github_owner:         mexxo-dvp
-          TF_VAR_github_repo:          gitops                         # add github_repo
-          TF_VAR_flux_path:            clusters/gke
-          TF_VAR_github_token:         ${{ secrets.GH_TOKEN }}
-          GITHUB_TOKEN:                ${{ secrets.GH_TOKEN }}
+          TF_VAR_project:       ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:        ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:          ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name:  gke-flux
+          TF_VAR_enable_flux_bootstrap: "false"
+          TF_VAR_github_owner:  mexxo-dvp
+          TF_VAR_github_repo:   gitops
+          TF_VAR_flux_path:     clusters/gke
         run: |
           if [ "${{ inputs.apply }}" = "true" ]; then
             terraform init -input=false
-            terraform apply -input=false -lock-timeout=10m -auto-approve
+            terraform apply -input=false -auto-approve
           else
             terraform init -backend=false -input=false
             terraform validate
-            terraform plan -no-color -input=false -lock-timeout=10m
+            terraform plan -no-color -input=false
           fi
+
+      - name: Flux bootstrap (CLI)
+        if: ${{ inputs.bootstrap == true && inputs.apply == true }}
+        env:
+          GITHUB_TOKEN:   ${{ secrets.GH_TOKEN }}
+          GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_REGION:  ${{ secrets.GCP_REGION }}
+          CLUSTER_NAME:   gke-flux
+        run: |
+          gcloud container clusters get-credentials "$CLUSTER_NAME" --region "$GOOGLE_REGION" --project "$GOOGLE_PROJECT"
+          curl -s https://fluxcd.io/install.sh | sudo bash
+          flux check --pre
+          flux bootstrap github \
+            --owner=mexxo-dvp \
+            --repository=gitops \
+            --branch=main \
+            --path=clusters/gke \
+            --personal \
+            --token-auth
+          # first sync (optional)
+          flux reconcile source git flux-system -n flux-system
+          flux reconcile kustomization flux-system -n flux-system --with-source

@@ -9,7 +9,7 @@ locals {
 }
 
 ############################################################
-# 1) VPC + Subnet with secondary ranges under VPC-native GKE
+# 1) VPC + Subnet with secondary ranges (VPC-native GKE)
 ############################################################
 resource "google_compute_network" "vpc" {
   name                    = local.vpc_name
@@ -37,19 +37,24 @@ resource "google_compute_subnetwork" "gke" {
 ############################################################
 resource "google_container_cluster" "this" {
   name     = var.cluster_name
-  location = var.region # Autopilot: регіон
+  location = var.region
 
   network    = google_compute_network.vpc.self_link
   subnetwork = google_compute_subnetwork.gke.self_link
 
-  release_channel { channel = "STABLE" }
-  enable_autopilot = true # <-- ось так
+  release_channel {
+    channel = "STABLE"
+  }
+
+  # Autopilot is enabled like this (without the autopilot{} block)
+  enable_autopilot = true
 
   ip_allocation_policy {
     cluster_secondary_range_name  = local.pods_range_name
     services_secondary_range_name = local.svcs_range_name
   }
 
+  # Workload Identity
   workload_identity_config {
     workload_pool = "${var.project}.svc.id.goog"
   }
@@ -57,16 +62,16 @@ resource "google_container_cluster" "this" {
   deletion_protection = false
 }
 
-
 ############################################################
-# 3) kubeconfig via official module → local file
+# 3) kubeconfig via official auth module → local file
 ############################################################
 module "gke_auth_self" {
   source       = "terraform-google-modules/kubernetes-engine/google//modules/auth"
   project_id   = var.project
   location     = var.region
   cluster_name = var.cluster_name
-  depends_on   = [google_container_cluster.this]
+
+  depends_on = [google_container_cluster.this]
 }
 
 resource "local_file" "kubeconfig" {
@@ -76,7 +81,7 @@ resource "local_file" "kubeconfig" {
 }
 
 ############################################################
-# 4) Deploy key + Flux bootstrap (via module)
+# 4) Deploy key (RO) для GitHub
 ############################################################
 module "tls_private_key" {
   source = "github.com/den-vasyliev/tf-hashicorp-tls-keys"
@@ -87,15 +92,4 @@ resource "github_repository_deploy_key" "flux_ro_gke" {
   title      = "flux-readonly-gke"
   key        = module.tls_private_key.public_key_openssh
   read_only  = true
-}
-
-module "flux_bootstrap_gke" {
-  source = "github.com/den-vasyliev/tf-fluxcd-flux-bootstrap"
-
-  github_repository = "${var.github_owner}/${var.github_repo}"
-  github_token      = var.github_token
-  private_key       = module.tls_private_key.private_key_pem
-
-  config_path = local_file.kubeconfig.filename
-  target_path = var.flux_path
 }
