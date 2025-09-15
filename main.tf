@@ -1,33 +1,82 @@
-#############################
-# infra/gke/main.tf
-#############################
-
 ############################################################
-# 1) GKE cluster (zonal: less SSD quota requirements)
-#    - GOOGLE_REGION   = europe-west1
-#    - GOOGLE_LOCATION = europe-west1-b (ZONE)
+# 0) Local names
 ############################################################
-module "gke" {
-  source = "github.com/mexxo-dvp/tf-google-gke-cluster"
-
-  # GCP
-  GOOGLE_PROJECT  = var.project
-  GOOGLE_REGION   = var.region
-  GOOGLE_LOCATION = var.location
-
-  # Cluster/Pool
-  GKE_CLUSTER_NAME = var.cluster_name
-  GKE_POOL_NAME    = var.pool_name
-  GKE_NUM_NODES    = var.node_count
-  GKE_MACHINE_TYPE = var.machine_type
-
-  # disk config:
-  # GKE_DISK_TYPE = "pd-standard"
-  # GKE_DISK_SIZE = 30
+locals {
+  vpc_name        = "gke-vpc"
+  subnet_name     = "gke-subnet"
+  pods_range_name = "gke-pods"
+  svcs_range_name = "gke-services"
 }
 
 ############################################################
-# 2) TLS keys + deploy key from GitHub (RO for Flux)
+# 1) VPC + Subnet with secondary ranges under VPC-native GKE
+############################################################
+resource "google_compute_network" "vpc" {
+  name                    = local.vpc_name
+  auto_create_subnetworks = false
+}
+
+resource "google_compute_subnetwork" "gke" {
+  name          = local.subnet_name
+  ip_cidr_range = "10.10.0.0/20"
+  region        = var.region
+  network       = google_compute_network.vpc.id
+
+  secondary_ip_range {
+    range_name    = local.pods_range_name
+    ip_cidr_range = "10.20.0.0/14"
+  }
+  secondary_ip_range {
+    range_name    = local.svcs_range_name
+    ip_cidr_range = "10.40.0.0/20"
+  }
+}
+
+############################################################
+# 2) GKE Autopilot (regional) + Workload Identity
+############################################################
+resource "google_container_cluster" "this" {
+  name     = var.cluster_name
+  location = var.region # Autopilot: регіон
+
+  network    = google_compute_network.vpc.self_link
+  subnetwork = google_compute_subnetwork.gke.self_link
+
+  release_channel { channel = "STABLE" }
+  enable_autopilot = true # <-- ось так
+
+  ip_allocation_policy {
+    cluster_secondary_range_name  = local.pods_range_name
+    services_secondary_range_name = local.svcs_range_name
+  }
+
+  workload_identity_config {
+    workload_pool = "${var.project}.svc.id.goog"
+  }
+
+  deletion_protection = false
+}
+
+
+############################################################
+# 3) kubeconfig via official module → local file
+############################################################
+module "gke_auth_self" {
+  source       = "terraform-google-modules/kubernetes-engine/google//modules/auth"
+  project_id   = var.project
+  location     = var.region
+  cluster_name = var.cluster_name
+  depends_on   = [google_container_cluster.this]
+}
+
+resource "local_file" "kubeconfig" {
+  content         = module.gke_auth_self.kubeconfig_raw
+  filename        = abspath("${path.root}/.kube/gke-${var.cluster_name}.kubeconfig")
+  file_permission = "0600"
+}
+
+############################################################
+# 4) Deploy key + Flux bootstrap (via module)
 ############################################################
 module "tls_private_key" {
   source = "github.com/den-vasyliev/tf-hashicorp-tls-keys"
@@ -40,38 +89,13 @@ resource "github_repository_deploy_key" "flux_ro_gke" {
   read_only  = true
 }
 
-############################################################
-# 3) kubeconfig via official auth module → local file
-############################################################
-module "gke_auth_self" {
-  source       = "terraform-google-modules/kubernetes-engine/google//modules/auth"
-  project_id   = var.project
-  location     = var.location # має збігатися із зоною вище
-  cluster_name = var.cluster_name
-
-  # ensure that the cluster has already been created
-  depends_on = [module.gke]
-}
-
-resource "local_file" "kubeconfig" {
-  content         = module.gke_auth_self.kubeconfig_raw
-  filename        = abspath("${path.root}/.kube/gke-${var.cluster_name}.kubeconfig")
-  file_permission = "0600"
-}
-
-############################################################
-# 4) Flux bootstrap in GKE
-############################################################
 module "flux_bootstrap_gke" {
   source = "github.com/den-vasyliev/tf-fluxcd-flux-bootstrap"
 
-  # GitHub
   github_repository = "${var.github_owner}/${var.github_repo}"
   github_token      = var.github_token
   private_key       = module.tls_private_key.private_key_pem
 
-  # kubeconfig
   config_path = local_file.kubeconfig.filename
-
-  target_path = var.target_path
+  target_path = var.flux_path
 }

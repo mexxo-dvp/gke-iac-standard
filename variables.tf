@@ -1,10 +1,10 @@
 #############################
-# infra/gke/variables.tf
+# variables.tf (Autopilot + WI)
 #############################
 
 variable "project" {
   type        = string
-  description = "GCP Project ID (e.g., civil-pattern-466501-m8)"
+  description = "GCP Project ID (e.g., fifth-diode-472114-p7)"
 }
 
 variable "region" {
@@ -13,36 +13,19 @@ variable "region" {
   default     = "europe-west1"
 }
 
-variable "location" {
+variable "zone" {
   type        = string
-  description = "GKE location: use ZONE for zonal cluster (e.g., europe-west1-b)"
+  description = "Optional GCP zone (e.g., europe-west1-b) for tools/compat"
   default     = "europe-west1-b"
 }
 
 variable "cluster_name" {
   type        = string
-  description = "Name of the GKE cluster"
+  description = "GKE Autopilot cluster name"
   default     = "gke-flux"
 }
 
-variable "pool_name" {
-  type        = string
-  description = "Name of the node pool"
-  default     = "default-pool"
-}
-
-variable "node_count" {
-  type        = number
-  description = "Number of nodes in the pool"
-  default     = 1
-}
-
-variable "machine_type" {
-  type        = string
-  description = "Machine type for GKE nodes"
-  default     = "e2-standard-2"
-}
-
+# --- Flux / GitHub ---
 variable "github_owner" {
   type        = string
   description = "GitHub owner/org (e.g., mexxo-dvp)"
@@ -50,17 +33,17 @@ variable "github_owner" {
 
 variable "github_repo" {
   type        = string
-  description = "GitHub repository name (e.g., sentinel-bot)"
+  description = "GitOps repository name (e.g., gitops)"
 }
 
 variable "github_token" {
   type        = string
-  description = "GitHub PAT (Classic) with repo + admin:public_key scopes"
+  description = "GitHub PAT (classic) with repo scope for bootstrap"
   sensitive   = true
 }
 
-variable "target_path" {
+variable "flux_path" {
   type        = string
-  description = "Path in the GitHub repository where Flux manifests will be stored (e.g., apps/)"
-  default     = "apps/"
+  description = "Path in the GitOps repo for cluster manifests"
+  default     = "clusters/gke"
 }
