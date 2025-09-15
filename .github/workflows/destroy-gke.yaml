@@ -27,9 +27,23 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - uses: hashicorp/setup-terraform@v3
+      # 0) install Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.8.5"
+
+      # 0.1) fallback: if for some reason terraform is still not in the PATH
+      - name: Ensure Terraform present (fallback)
+        run: |
+          if ! command -v terraform >/dev/null 2>&1; then
+            echo "Terraform not found, installing fallback..."
+            curl -fsSL https://releases.hashicorp.com/terraform/1.8.5/terraform_1.8.5_linux_amd64.zip -o /tmp/tf.zip
+            sudo unzip -o /tmp/tf.zip -d /usr/local/bin
+            terraform -version
+          else
+            terraform -version
+          fi
 
       # best-effort: remove stuck lock in GCS
       - name: Clear stale Terraform lock (best-effort)
@@ -45,7 +59,7 @@ jobs:
           fi
           gsutil rm -f "${LOCK_PATH}" || true
 
-      # 1) normal destroy (may fail due to orphan provider)
+      # 1) normal destroy
       - name: Terraform Destroy (try)
         id: tf_destroy
         continue-on-error: true
@@ -64,7 +78,7 @@ jobs:
           terraform init -input=false
           terraform destroy -input=false -lock-timeout=10m -auto-approve
 
-      # 2) fallback: delete the cluster where it actually exists (zone/region), and clear the state
+      # 2) fallback: find location (zone/region) and delete cluster + clear state
       - name: Legacy cleanup (detect location, gcloud delete, state rm)
         if: steps.tf_destroy.outcome == 'failure'
         env:
@@ -74,24 +88,21 @@ jobs:
           set -euxo pipefail
           echo "Terraform destroy failed — running legacy cleanup..."
 
-          # знайти локацію кластера
           LOC=$(gcloud container clusters list --project "$PROJECT_ID" \
                  --filter="name=$CLUSTER_NAME" --format="value(location)" | head -n1 || true)
           echo "Detected cluster location: ${LOC:-<none>}"
 
           if [[ -n "${LOC:-}" ]]; then
             if [[ "$LOC" =~ -[a-z]$ ]]; then
-              # zonal
               gcloud container clusters delete "$CLUSTER_NAME" --zone "$LOC" --project "$PROJECT_ID" --quiet || true
             else
-              # regional
               gcloud container clusters delete "$CLUSTER_NAME" --region "$LOC" --project "$PROJECT_ID" --quiet || true
             fi
           fi
 
           terraform init -input=false
 
-          # прибрати легасі-адреси з state (старий модуль + auth)
+          # прибираємо з state старі адреси module.gke.* та module.gke_auth_self.*
           mapfile -t LEGACY < <(terraform state list | sed -n 's/^\(module\.gke\..*\)$/\1/p; s/^\(module\.gke_auth_self\..*\)$/\1/p')
           if [ "${#LEGACY[@]}" -gt 0 ]; then
             for addr in "${LEGACY[@]}"; do
@@ -108,7 +119,7 @@ jobs:
             fi
           done
 
-      # 3) final pass (remove deploy key, tls, etc.)
+      # 3) final pass
       - name: Terraform Destroy (final pass)
         if: always()
         env:
