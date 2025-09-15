@@ -19,6 +19,8 @@ concurrency:
 jobs:
   create:
     runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: "1"
 
     steps:
       - name: Checkout
@@ -43,7 +45,7 @@ jobs:
           pwd; ls -la
           find . -maxdepth 2 -name "*.tf" -print
 
-      # best-effort: remove stuck lock in GCS according to backend.tf
+      # best-effort: remove the stuck lock in GCS according to backend.tf
       - name: Clear stale Terraform lock (best-effort)
         shell: bash
         run: |
@@ -61,20 +63,18 @@ jobs:
 
       - name: Terraform Plan/Apply
         env:
-          # basic variables for creating a cluster
-          TF_VAR_project_id:         ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:             ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:               ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name:       gke-flux
+          # matching names from variables.tf
+          TF_VAR_project:              ${{ secrets.GCP_PROJECT_ID }}   # was project_id, needed project
+          TF_VAR_region:               ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:                 ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name:         gke-flux
 
-          # variables for the flux_bootstrap_gke module (so that TF does not wait for input)
-          TF_VAR_github_owner:       mexxo-dvp
-          TF_VAR_github_repository:  gitops
-          TF_VAR_flux_path:          clusters/gke
-          TF_VAR_github_token:       ${{ secrets.GH_TOKEN }}
-
-          # for provider integrations/github
-          GITHUB_TOKEN:              ${{ secrets.GH_TOKEN }}
+          # for Flux module and GitHub provider
+          TF_VAR_github_owner:         mexxo-dvp
+          TF_VAR_github_repo:          gitops                         # add github_repo
+          TF_VAR_flux_path:            clusters/gke
+          TF_VAR_github_token:         ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN:                ${{ secrets.GH_TOKEN }}
         run: |
           if [ "${{ inputs.apply }}" = "true" ]; then
             terraform init -input=false
