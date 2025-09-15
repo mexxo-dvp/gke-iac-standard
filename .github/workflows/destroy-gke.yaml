@@ -1,10 +1,21 @@
 name: Destroy GKE
+
 on:
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: destroy-gke
+  cancel-in-progress: true
 
 jobs:
   destroy:
     runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -17,13 +28,36 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: 1.8.5
+          terraform_version: "1.8.5"
+
+      # optional: remove stuck lock in GCS (like in create)
+      - name: Clear stale Terraform lock (best-effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUCKET=$(grep -E 'bucket *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/')
+          PREFIX=$(grep -E 'prefix *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          if [[ -n "${PREFIX:-}" ]]; then
+            LOCK_PATH="gs://${BUCKET}/${PREFIX}/default.tflock"
+          else
+            LOCK_PATH="gs://${BUCKET}/default.tflock"
+          fi
+          gsutil rm -f "${LOCK_PATH}" || true
 
       - name: Terraform Destroy
         env:
-          TF_VAR_project_id: ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:     ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:       ${{ secrets.GCP_ZONE }}
+          # according to variables.tf
+          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:       ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name: gke-flux
+
+          # if the flux_bootstrap_gke module is enabled in main.tf
+          TF_VAR_github_owner: mexxo-dvp
+          TF_VAR_github_repo:  gitops
+          TF_VAR_flux_path:    clusters/gke
+          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
         run: |
-          terraform init
-          terraform destroy -auto-approve
+          terraform init -input=false
+          terraform destroy -input=false -lock-timeout=10m -auto-approve
