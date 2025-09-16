@@ -38,7 +38,7 @@ jobs:
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
-          install_components: 'gke-gcloud-auth-plugin'
+          install_components: gke-gcloud-auth-plugin
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -60,7 +60,9 @@ jobs:
           TF_VAR_github_owner: mexxo-dvp
           TF_VAR_github_repo:  gitops
           TF_VAR_flux_path:    clusters/gke
+        shell: bash
         run: |
+          set -euo pipefail
           if [ "${{ inputs.apply }}" = "true" ]; then
             terraform init -input=false
             terraform apply -input=false -auto-approve
@@ -77,7 +79,9 @@ jobs:
           GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_REGION:  ${{ secrets.GCP_REGION }}
           CLUSTER_NAME:   gke-flux
+        shell: bash
         run: |
+          set -euo pipefail
           # kube-context
           gcloud container clusters get-credentials "$CLUSTER_NAME" --region "$GOOGLE_REGION" --project "$GOOGLE_PROJECT"
 
@@ -85,7 +89,7 @@ jobs:
           curl -s https://fluxcd.io/install.sh | sudo bash
           flux check --pre
 
-          # GitOps bootstrap до репо mexxo-dvp/gitops, гілка main, шлях clusters/gke
+          # GitOps bootstrap to the mexxo-dvp/gitops repo, branch main, path clusters/gke
           flux bootstrap github \
             --owner=mexxo-dvp \
             --repository=gitops \
@@ -93,5 +97,7 @@ jobs:
             --path=clusters/gke \
             --personal \
             --token-auth
+
+          # First reconcile
           flux reconcile source git flux-system -n flux-system
           flux reconcile kustomization flux-system -n flux-system --with-source
