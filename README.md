@@ -1,377 +1,561 @@
-# GKE IaC (Terraform) — робочий гайд
+<a id="ua"></a>
+[UA](#ua) | [EN](#en)
 
-> Це **root**‑репозиторій `gke-iac`, який створює/керує кластерами **GKE** через Terraform.
-> У репозиторії **gitops** ми нічого не змінювали, окрім ключів/секретів; bootstrap Flux тут лише підвʼязує кластер до вже підготовленого GitOps‑шляху.
+# GKE IaC (Terraform) — Autopilot + Flux bootstrap (via CLI) {#ua}
 
----
+Цей репозиторій розгортає **VPC‑native кластер GKE Autopilot** з увімкненим **Workload Identity** і формує локальний **kubeconfig**. Для вашого GitOps‑репозиторію створюється **GitHub deploy key (read‑only)**. Додатково, GitHub Actions‑workflow може **запустити Flux bootstrap** через CLI після готовності кластера.
 
-## Репозиторії
-
-* **Модуль**: `github.com/mexxo-dvp/tf-google-gke-cluster`
-
-  * Описує ресурси `google_container_cluster` та `google_container_node_pool`.
-  * Ключові моменти:
-
-    * `deletion_protection = false` для керованих замін/видалень.
-    * Параметр `GOOGLE_LOCATION` (підтримує **регіон** або **зону**).
-
-* **Root**: цей репозиторій (**gke-iac**)
-
-  * Підтягує модуль, визначає вхідні змінні, `tfvars`, бекенд, та CI‑workflow для створення GKE і (опційно) Flux bootstrap.
+> **Поточний репозиторій:** `gke-iac` (root IaC)
+>
+> **Пов’язаний GitOps‑репо (маніфести + SOPS/Flux):** `mexxo-dvp/gitops` (споживається Flux після bootstrap)
 
 ---
 
-## Передумови (локально / Cloud Shell)
+## Що створюється
 
-* Активний проєкт:
+1. **VPC і підмережа** (VPC‑native):
 
-```bash
-gcloud config get-value project
+   * VPC: `gke-vpc`
+   * Subnet: `gke-subnet` (`10.10.0.0/20`)
+   * Вторинні діапазони:
+
+     * Pods   → `gke-pods` = `10.20.0.0/14`
+     * Svcs   → `gke-services` = `10.40.0.0/20`
+2. **Кластер GKE Autopilot** (регіональний; `release_channel = STABLE`) з **Workload Identity**:
+
+   * Назва кластера → `var.cluster_name` (за замовчуванням `gke-flux`)
+   * Регіон → `var.region` (за замовчуванням `europe-west1`)
+   * `workload_identity_config.workload_pool = "${var.project}.svc.id.goog"`
+   * `deletion_protection = false` (дозволяє заміни/видалення з Terraform)
+3. **Kubeconfig**, який записується локально на runner’і:
+
+   * `${repo}/.kube/gke-${var.cluster_name}.kubeconfig` (output `kubeconfig_path`)
+4. **GitHub deploy key (read‑only)** для вашого GitOps‑репозиторію через `github_repository_deploy_key`.
+
+> **Примітка:** Flux **не** керується через Terraform у цьому репозиторії. Включений workflow виконує **Flux CLI bootstrap** після створення кластера.
+
+---
+
+## Структура репозиторію
+
+```
+.
+├─ main.tf                  # VPC/Subnet + GKE Autopilot + kubeconfig + GH deploy key
+├─ providers.tf             # провайдери: google, google-beta, github, local, tls
+├─ versions.tf              # обмеження версій Terraform та провайдерів
+├─ variables.tf             # вхідні змінні (project/region/zone/тощо)
+├─ outputs.tf               # kubeconfig_path
+├─ backend.tf               # бекенд стану (GCS bucket)
+├─ .gitignore
+└─ .github/workflows/
+   ├─ create-gke.yaml       # Terraform plan/apply + Flux CLI bootstrap
+   └─ destroy-gke.yaml      # Terraform destroy (+ аварійне прибирання)
 ```
 
-* Увімкнені API:
+---
+
+## Передумови
+
+### 1) Google Cloud
+
+* **Увімкнені API** у вашому проєкті:
+
+  ```bash
+  gcloud services enable container.googleapis.com compute.googleapis.com
+  ```
+* **Бакет для віддаленого стану** (за потреби відредагуйте `backend.tf`). Наразі використовується:
+
+  ```hcl
+  terraform {
+    backend "gcs" {
+      bucket = "tf-state-fifth-diode-472114-p7"
+      prefix = "gke-iac/terraform-state"
+    }
+  }
+  ```
+
+  Якщо ви форкаєте репозиторій або міняєте проєкт — створіть власний бакет і оновіть `backend.tf`.
+
+  ```bash
+  PROJECT_ID=$(gcloud config get-value project)
+  gsutil mb -l europe-west1 "gs://tf-state-${PROJECT_ID}"
+  gsutil versioning set on "gs://tf-state-${PROJECT_ID}"
+  ```
+
+### 2) Сервісний акаунт для CI
+
+Створіть сервісний акаунт та надайте мінімально необхідні ролі:
 
 ```bash
-gcloud services enable container.googleapis.com compute.googleapis.com
+PROJECT_ID=<your-project>
+SA_ID=gha-ci
+SA_EMAIL="${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+# створення SA
+gcloud iam service-accounts create "$SA_ID" \
+  --description="GitHub Actions Terraform runner" \
+  --display-name="GitHub Actions CI"
+
+# ролі для мережі та GKE
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${SA_EMAIL}" \
+  --role roles/container.admin
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${SA_EMAIL}" \
+  --role roles/compute.networkAdmin
+
+# доступ до бакета стану (замініть BUCKET, якщо змінили backend.tf)
+BUCKET="tf-state-${PROJECT_ID}"
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
+  --member "serviceAccount:${SA_EMAIL}" \
+  --role roles/storage.objectAdmin
+
+# необов’язково: якщо з CI будете вмикати/вимикати сервіси
+#gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+#  --member "serviceAccount:${SA_EMAIL}" \
+#  --role roles/serviceusage.serviceUsageAdmin
+
+# створіть JSON‑ключ — завантажте його в GitHub Secret GCP_SA_KEY
+gcloud iam service-accounts keys create ./gcp-sa-key.json \
+  --iam-account "$SA_EMAIL"
 ```
 
-* **ADC (Application Default Credentials)** — якщо були помилки токена локально:
+### 3) GitHub Secrets (для Actions)
+
+Створіть секрети в **Repo Settings → Secrets and variables → Actions → New repository secret**:
+
+| Назва секрету    | Що це                                                                              |
+| ---------------- | ---------------------------------------------------------------------------------- |
+| `GCP_SA_KEY`     | **JSON**‑ключ сервісного акаунту CI (вміст `gcp-sa-key.json`).                     |
+| `GCP_PROJECT_ID` | Ваш ID проєкту GCP (наприклад, `fifth-diode-472114-p7`).                           |
+| `GCP_REGION`     | Регіон кластера (наприклад, `europe-west1`).                                       |
+| `GCP_ZONE`       | Зона (наприклад, `europe-west1-b`) — для інструментів/сумісності.                  |
+| `GH_TOKEN`       | **PAT (classic)** GitHub зі скоупами: `repo`, `admin:public_key` (для deploy key). |
+
+> **Чому PAT?** Провайдер `github` створює **deploy key** у вашому GitOps‑репозиторії; для цього потрібен скоуп `admin:public_key`.
+
+---
+
+## Локальний запуск (опціонально)
+
+Аутентифікація та встановлення ADC (якщо потрібно):
 
 ```bash
-# прибрати поламані ADC
+# приберіть зламаний ADC, якщо є
 unset GOOGLE_APPLICATION_CREDENTIALS
 rm -f ~/.config/gcloud/application_default_credentials.json
 
-# нові ADC
+# новий ADC
 gcloud auth application-default login --quiet
-
-# привʼязати квоти до проєкту
 PROJECT_ID=$(gcloud config get-value project)
 gcloud auth application-default set-quota-project "$PROJECT_ID"
-
-# sanity-check
-gcloud auth application-default print-access-token | head -c 20; echo
 ```
 
----
-
-## Структура (root `gke-iac/`)
-
-```
-gke-iac/
-├─ .github/
-|  └─workflows/
-|   ├─create-gke.yaml
-|   └─destroy-gke.yaml
-├─ main.tf
-├─ variables.tf
-├─ vars.tfvars
-├─ backend.tf
-├─ outputs.tf
-├─ providers.tf
-├─ versions.tf
-├─ .gitignore
-└─ README.md
-```
-
-### `backend.tf` (GCS бекенд)
-
-```hcl
-terraform {
-  backend "gcs" {
-    bucket = "tf-state-<YOUR_PROJECT_ID>"
-    prefix = "gke-iac/terraform-state"
-  }
-}
-```
-
-### `variables.tf`
-
-```hcl
-variable "GOOGLE_PROJECT"  { type = string }
-variable "GOOGLE_REGION"   { type = string } # напр. "europe-west1"
-variable "GOOGLE_LOCATION" { type = string } # регіон або зона, напр. "europe-west1-b"
-
-variable "GKE_CLUSTER_NAME" { type = string, default = "main-z" }
-variable "GKE_POOL_NAME"    { type = string, default = "main" }
-variable "GKE_MACHINE_TYPE" { type = string, default = "g1-small" }
-variable "GKE_NUM_NODES"    { type = number, default = 1 }
-```
-
-### `vars.tfvars`
-
-```hcl
-GOOGLE_PROJECT   = "<YOUR_PROJECT_ID>"
-GOOGLE_REGION    = "europe-west1"
-GOOGLE_LOCATION  = "europe-west1-b"
-GKE_CLUSTER_NAME = "main-z"
-GKE_POOL_NAME    = "main"
-GKE_MACHINE_TYPE = "g1-small"
-GKE_NUM_NODES    = 1
-```
-
-### `main.tf` (root, підключає модуль)
-
-```hcl
-module "gke_cluster" {
-  source = "github.com/mexxo-dvp/tf-google-gke-cluster"
-
-  GOOGLE_PROJECT   = var.GOOGLE_PROJECT
-  GOOGLE_REGION    = var.GOOGLE_REGION
-  GOOGLE_LOCATION  = var.GOOGLE_LOCATION   # для зонального кластера — передаємо ЗОНУ
-  GKE_CLUSTER_NAME = var.GKE_CLUSTER_NAME
-  GKE_POOL_NAME    = var.GKE_POOL_NAME
-  GKE_MACHINE_TYPE = var.GKE_MACHINE_TYPE
-  GKE_NUM_NODES    = var.GKE_NUM_NODES
-}
-```
-
-### `.gitignore`
-
-```gitignore
-.terraform/
-*.tfstate*
-*.tfplan
-crash.log
-override.tf
-override.tf.json
-plan.json
-.terraform.lock.hcl
-```
-
----
-
-## Модуль: ключові моменти (для довідки)
-
-```hcl
-resource "google_container_cluster" "this" {
-  name     = var.GKE_CLUSTER_NAME
-  location = var.GOOGLE_LOCATION       # регіон або зона
-
-  deletion_protection       = false    # критично для керованих destroy/replace
-  remove_default_node_pool  = true
-  initial_node_count        = 1
-
-  workload_identity_config {
-    workload_pool = "${var.GOOGLE_PROJECT}.svc.id.goog"
-  }
-
-  node_config {
-    workload_metadata_config { mode = "GKE_METADATA" }
-  }
-}
-
-resource "google_container_node_pool" "this" {
-  name       = var.GKE_POOL_NAME
-  project    = var.GOOGLE_PROJECT
-  cluster    = google_container_cluster.this.name
-  location   = var.GOOGLE_LOCATION
-  node_count = var.GKE_NUM_NODES
-
-  node_config {
-    machine_type = var.GKE_MACHINE_TYPE
-  }
-}
-```
-
-> Змінні в модулі та у root мають збігатися.
-
----
-
-## GCS‑бакет під Terraform state
+Ініціалізація та застосування:
 
 ```bash
-PROJECT_ID=$(gcloud config get-value project)
-BUCKET="tf-state-${PROJECT_ID}"
+export TF_VAR_project="$PROJECT_ID"
+export TF_VAR_region="europe-west1"
+export TF_VAR_zone="europe-west1-b"
+export TF_VAR_cluster_name="gke-flux"
 
-# створити бакет (рекомендовано у тому ж регіоні, що й кластер)
-gsutil mb -l europe-west1 "gs://${BUCKET}"
-
-# ввімкнути версіонування
-gsutil versioning set on "gs://${BUCKET}"
-```
-
-Потім пропишіть `bucket` у `backend.tf` і зробіть `terraform init` (погодьтеся на міграцію локального стейту, якщо буде запропоновано).
-
----
-
-## Ініціалізація, план і аплай
-
-```bash
 terraform init -upgrade
 terraform fmt -recursive
 terraform validate
-
-# (опц.) окремий workspace для сценарію
-terraform workspace new zonal || terraform workspace select zonal
-
-# план і аплай
-terraform plan   -var-file=vars.tfvars -out=zonal.tfplan
-terraform apply "zonal.tfplan"
+terraform plan -out=plan.tfplan
+terraform apply plan.tfplan
 ```
 
-**Очікувано**: створиться **зональний** кластер `main-z` у `europe-west1-b` з 1 нодою типу `g1-small`.
-
----
-
-## Перевірка кластера
+Вивід kubeconfig (для швидкого `kubectl`):
 
 ```bash
-# огляд кластерів
-gcloud container clusters list --format='table(name,location,status)'
-
-# нодпули (для зонального кластера)
-gcloud container node-pools list --cluster main-z --zone europe-west1-b \
-  --format='table(name,initialNodeCount,locations)'
-
-# kube‑контекст і ноди
-gcloud container clusters get-credentials main-z --zone europe-west1-b
-kubectl get nodes -o wide
+KUBECONFIG=$(terraform output -raw kubeconfig_path) kubectl get nodes -o wide
 ```
 
-Приклад (очікувано 1 нода):
+Локальне знищення:
 
-```
-NAME                            STATUS   ROLES   AGE   VERSION               INTERNAL-IP   EXTERNAL-IP
-gke-main-z-main-xxxxxxx-xxxx    Ready    <none>  ...   v1.33.x-gke.xxxxx     10.132.x.x    34.xxx.xx.x
+```bash
+terraform destroy -auto-approve
 ```
 
 ---
 
-## Infracost (опційно)
+## GitHub Actions — робочі процеси
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+### Створення GKE + Flux (CLI)
 
-terraform show -json zonal.tfplan > plan.json
-infracost breakdown --path plan.json
-# (опц.) різниця планів
-infracost diff --path plan.json
-```
+Workflow: `.github/workflows/create-gke.yaml`
 
-> Орієнтовно (1 нода `g1-small`): \~ **\$92/міс** (Cluster mgmt fee \~\$73 + інстанс \~\$15 + PD \~\$4).
+* **Вхідні параметри:**
+
+  * `apply` (bool, за замовчуванням: `true`) — якщо `false`, виконує лише plan/validate.
+  * `bootstrap` (bool, за замовчуванням: `true`) — запуск **Flux CLI bootstrap** після apply.
+* **Що виконує:**
+
+  1. Авторизація в GCP через `GCP_SA_KEY`.
+  2. `terraform init` + `apply` (створює VPC/Subnet, GKE Autopilot, kubeconfig та GH deploy key).
+  3. Якщо `bootstrap = true`: отримує kube‑context і виконує
+
+     ```bash
+     flux bootstrap github \
+       --owner=mexxo-dvp \
+       --repository=gitops \
+       --branch=main \
+       --path=clusters/gke \
+       --personal \
+       --token-auth
+     flux reconcile source git flux-system -n flux-system
+     flux reconcile kustomization flux-system -n flux-system --with-source
+     ```
+
+> Після bootstrap Flux читає з **`mexxo-dvp/gitops` → `clusters/gke`**. Налаштування SOPS/KMS і маніфести застосунків підтримуються **в тому репозиторії**.
+
+### Знищення GKE
+
+Workflow: `.github/workflows/destroy-gke.yaml`
+
+* Виконує `terraform destroy` з тим самим бекендом і змінними.
+* Якщо знищення падає (локи, дріфт), виконується **fallback‑прибирання**:
+
+  * Визначає локацію кластера через `gcloud`, видаляє кластер, чистить застарілі адреси стану TF, потім повторює фінальне destroy.
 
 ---
 
-## Ремоут‑стейт: перевірка
+## Змінні (загальний огляд)
 
-```bash
-BUCKET=$(jq -r '.backend.config.bucket'  .terraform/terraform.tfstate)
-PREFIX=$(jq -r '.backend.config.prefix'  .terraform/terraform.tfstate)
-WS=$(terraform workspace show)
+Повні описи див. у `variables.tf`.
 
-echo "bucket=${BUCKET}"
-echo "prefix=${PREFIX}"
-echo "workspace=${WS}"
+| Змінна         | За замовчуванням | Примітки                                    |
+| -------------- | ---------------- | ------------------------------------------- |
+| `project`      | —                | **Обов’язково**: ID проєкту GCP             |
+| `region`       | `europe-west1`   | Регіональний кластер Autopilot              |
+| `zone`         | `europe-west1-b` | Для інструментів/сумісності                 |
+| `cluster_name` | `gke-flux`       | Назва кластера                              |
+| `github_owner` | `mexxo-dvp`      | Цільовий власник репозиторію для deploy key |
+| `github_repo`  | `gitops`         | Репозиторій, куди додається deploy key      |
+| `github_token` | порожньо         | PAT (classic), якщо TF взаємодіє з GitHub   |
+| `flux_path`    | `clusters/gke`   | Використовується workflow’ом bootstrap      |
 
-gsutil ls -l "gs://${BUCKET}/${PREFIX}/${WS}.tfstate"
+---
+
+## Workload Identity
+
+Кластер створюється з **WI** (`workload_pool = "${project}.svc.id.goog"`). Після bootstrap у **GitOps‑репо** анотуйте KSA (Kubernetes ServiceAccount), яким потрібен доступ до GCP (наприклад, контролери Flux для розшифровки SOPS через GCP KMS). Приклад анотації:
+
+```yaml
+metadata:
+  annotations:
+    iam.gke.io/gcp-service-account: "flux-kustomize@<PROJECT_ID>.iam.gserviceaccount.com"
+```
+
+Переконайтеся, що відповідний GSA має роль **KMS CryptoKey Decrypter** для вашого ключа, а також налаштовані зв’язки **Workload Identity User** для цільових KSA.
+
+---
+
+## Вартість і життєвий цикл
+
+* **Autopilot** тарифікується за Pod/vCPU/пам’ять + плата за кластер; вартість залежить від регіону та навантаження.
+* Зміна `region` або IP‑діапазонів **пересоздає** мережу та кластер.
+* `deletion_protection = false` — свідомий вибір для автоматизації CI/CD.
+
+---
+
+## Усунення несправностей
+
+**Backend “bucket not found”**
+Створіть бакет та/або оновіть `backend.tf` на вашу назву; перевірте, що CI‑SA має роль `roles/storage.objectAdmin`.
+
+**Помилка `google-github-actions/auth`**
+Перевірте, що `GCP_SA_KEY` — валідний **JSON** від сервісного акаунта у вибраному проєкті та потрібні API увімкнені.
+
+**Проблема на кроці GitHub deploy key**
+`GH_TOKEN` має бути PAT (classic) зі скоупами `repo` і `admin:public_key`, а репозиторій `github_owner/repo` має існувати.
+
+**Помилки Flux bootstrap**
+Перевірте досяжність кластера (`kubectl cluster-info` з виданим kubeconfig) і що шлях у GitOps‑репо існує (`clusters/gke`). Якщо використовуєте SOPS + GCP KMS у тому репозиторії, звірте **проєкт/регіон ключа** та зв’язки **Workload Identity**.
+
+**kubeconfig не знайдено локально**
+Шлях kubeconfig створюється на **runner’і**. Для локальних запусків одразу після apply використовуйте `terraform output -raw kubeconfig_path`.
+
+---
+<a id="en"></a>
+
+# GKE IaC (Terraform) — Autopilot + Flux bootstrap (via CLI) {#en}
+
+This repo provisions **a VPC‑native GKE Autopilot cluster** with **Workload Identity** and writes a local **kubeconfig**. A GitHub deploy key (read‑only) is created for your GitOps repo. Optionally, a GitHub Actions workflow can **bootstrap Flux** into the cluster.
+
+> **Repo you’re reading:** `gke-iac` (root IaC)
+>
+> **Related GitOps repo (manifests + SOPS/Flux):** `mexxo-dvp/gitops` (consumed by Flux after bootstrap)
+
+---
+
+## What this creates
+
+1. **VPC & Subnet** (VPC‑native):
+
+   * VPC: `gke-vpc`
+   * Subnet: `gke-subnet` (`10.10.0.0/20`)
+   * Secondary ranges:
+
+     * Pods   → `gke-pods` = `10.20.0.0/14`
+     * Svcs   → `gke-services` = `10.40.0.0/20`
+2. **GKE Autopilot cluster** (regional; `release_channel = STABLE`), with **Workload Identity**:
+
+   * Cluster name → `var.cluster_name` (default `gke-flux`)
+   * Region → `var.region` (default `europe-west1`)
+   * `workload_identity_config.workload_pool = "${var.project}.svc.id.goog"`
+   * `deletion_protection = false` (allows replacements/destroys from TF)
+3. **Kubeconfig** written locally on runner:
+
+   * `${repo}/.kube/gke-${var.cluster_name}.kubeconfig` (output `kubeconfig_path`)
+4. **GitHub deploy key (read‑only)** for your GitOps repo via `github_repository_deploy_key`.
+
+> **Note:** Flux itself is **not** managed by Terraform here. The included workflow runs **Flux CLI bootstrap** after the cluster is ready.
+
+---
+
+## Repository layout
+
+```
+.
+├─ main.tf                  # VPC/Subnet + GKE Autopilot + kubeconfig + GH deploy key
+├─ providers.tf             # google, google-beta, github, local, tls providers
+├─ versions.tf              # provider & TF version constraints
+├─ variables.tf             # inputs (project/region/zone/etc.)
+├─ outputs.tf               # kubeconfig_path
+├─ backend.tf               # GCS backend (state bucket)
+├─ .gitignore
+└─ .github/workflows/
+   ├─ create-gke.yaml       # Terraform plan/apply + Flux CLI bootstrap
+   └─ destroy-gke.yaml      # Terraform destroy (+ fallback cleanup)
 ```
 
 ---
 
-## CI/CD: GitHub Actions у цьому репозиторії
+## Prerequisites
 
-### Обовʼязкові **Secrets** (repo **gke-iac**)
+### 1) Google Cloud
 
-* `GCP_SA_KEY` — **JSON ключ** сервісного акаунта для CI (Terraform/gcloud).
-* `GCP_PROJECT_ID` — напр. `fifth-diode-<...>`
-* `GCP_REGION` — напр. `europe-west1`
-* `GCP_ZONE` — напр. `europe-west1-b`
-* `GH_TOKEN` — **PAT** із правами `repo` + `admin:public_key` (потрібен, якщо вмикаєте Flux bootstrap до репо **gitops**).
+* **APIs enabled** on your project:
 
-### Ролі для CI‑Service Account
+  ```bash
+  gcloud services enable container.googleapis.com compute.googleapis.com
+  ```
+* **Remote state bucket** (edit `backend.tf` if needed). This repo currently uses:
+
+  ```hcl
+  terraform {
+    backend "gcs" {
+      bucket = "tf-state-fifth-diode-472114-p7"
+      prefix = "gke-iac/terraform-state"
+    }
+  }
+  ```
+
+  If you fork this repo or use another project, create your own bucket and update `backend.tf`.
+
+  ```bash
+  PROJECT_ID=$(gcloud config get-value project)
+  gsutil mb -l europe-west1 "gs://tf-state-${PROJECT_ID}"
+  gsutil versioning set on "gs://tf-state-${PROJECT_ID}"
+  ```
+
+### 2) Service Account for CI
+
+Create a CI service account and grant the minimal roles:
 
 ```bash
-SA_EMAIL="gha-ci@<PROJECT_ID>.iam.gserviceaccount.com"
-PROJECT_ID="<PROJECT_ID>"
-TF_BUCKET="tf-state-<PROJECT_ID>"
+PROJECT_ID=<your-project>
+SA_ID=gha-ci
+SA_EMAIL="${SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-# GKE / VPC
+# create SA
+gcloud iam service-accounts create "$SA_ID" \
+  --description="GitHub Actions Terraform runner" \
+  --display-name="GitHub Actions CI"
+
+# roles for networking + GKE
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:${SA_EMAIL}" --role roles/container.admin
+  --member "serviceAccount:${SA_EMAIL}" \
+  --role roles/container.admin
 
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:${SA_EMAIL}" --role roles/compute.networkAdmin
+  --member "serviceAccount:${SA_EMAIL}" \
+  --role roles/compute.networkAdmin
 
-# Доступ до GCS state
-gcloud storage buckets add-iam-policy-binding "gs://${TF_BUCKET}" \
-  --member "serviceAccount:${SA_EMAIL}" --role roles/storage.objectAdmin
+# remote state bucket access (replace BUCKET if you changed backend.tf)
+BUCKET="tf-state-${PROJECT_ID}"
+gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
+  --member "serviceAccount:${SA_EMAIL}" \
+  --role roles/storage.objectAdmin
+
+# optional: if you intend to enable/disable services from CI
+#gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+#  --member "serviceAccount:${SA_EMAIL}" \
+#  --role roles/serviceusage.serviceUsageAdmin
+
+# create a JSON key — upload its content to GitHub Secret GCP_SA_KEY
+gcloud iam service-accounts keys create ./gcp-sa-key.json \
+  --iam-account "$SA_EMAIL"
 ```
 
-### Workflow: **Create GKE + Flux (CLI)**
+### 3) GitHub Secrets (for Actions)
 
-* Файл: `.github/workflows/create-gke.yaml`
-* Запуск: **Actions → Create GKE + Flux (CLI) → Run workflow**
-* Інпути:
+Set these in **Repo Settings → Secrets and variables → Actions → New repository secret**:
 
-  * `apply` — `true` виконує `terraform apply` (інакше тільки `plan`).
-  * `bootstrap` — `true` запускає `flux bootstrap` до репо **gitops** (ідемпотентно).
+| Secret name      | What it is                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------- |
+| `GCP_SA_KEY`     | **JSON** key of the CI service account (contents of `gcp-sa-key.json`).                 |
+| `GCP_PROJECT_ID` | Your GCP project ID (e.g., `fifth-diode-472114-p7`).                                    |
+| `GCP_REGION`     | Region for the cluster (e.g., `europe-west1`).                                          |
+| `GCP_ZONE`       | Zone (e.g., `europe-west1-b`) — used by tools/compat.                                   |
+| `GH_TOKEN`       | GitHub **PAT (classic)** with scopes: `repo`, `admin:public_key` (for deploy key mgmt). |
 
-**Що робить workflow**:
+> **Why PAT?** The `github` provider creates a **deploy key** in your GitOps repo; this needs the `admin:public_key` scope.
 
-1. `terraform init/plan/apply` з бекендом у GCS;
-2. `gcloud container clusters get-credentials` для нового кластера;
-3. (якщо `bootstrap=true`) `flux bootstrap github --owner=mexxo-dvp --repository=gitops --branch=main --path=clusters/gke --personal --token-auth`.
+---
 
-> **Примітка:** у репозиторії **gitops** ми нічого не змінювали, окрім ключів/секретів. Flux bootstrap тут лише підвʼяже кластер до вашого GitOps‑шляху `clusters/gke`.
+## Running locally (optional)
 
-### Як підключитись до кластера локально
+Authenticate and set ADC (if needed):
 
 ```bash
-gcloud container clusters get-credentials gke-flux \
-  --region "$GCP_REGION" --project "$GCP_PROJECT_ID"
+# clean up previous ADC if broken
+unset GOOGLE_APPLICATION_CREDENTIALS
+rm -f ~/.config/gcloud/application_default_credentials.json
 
-kubectl get nodes
+# new ADC
+gcloud auth application-default login --quiet
+PROJECT_ID=$(gcloud config get-value project)
+gcloud auth application-default set-quota-project "$PROJECT_ID"
 ```
 
-### Ротація `GCP_SA_KEY` (для цього репо)
+Initialize and apply:
 
 ```bash
-SA_EMAIL="gha-ci@<PROJECT_ID>.iam.gserviceaccount.com"
-PROJECT_ID="<PROJECT_ID>"
+export TF_VAR_project="$PROJECT_ID"
+export TF_VAR_region="europe-west1"
+export TF_VAR_zone="europe-west1-b"
+export TF_VAR_cluster_name="gke-flux"
 
-gcloud iam service-accounts keys create gcp-sa-key.json \
-  --iam-account="$SA_EMAIL" --project "$PROJECT_ID"
+terraform init -upgrade
+terraform fmt -recursive
+terraform validate
+terraform plan -out=plan.tfplan
+terraform apply plan.tfplan
+```
 
-# Далі: Settings → Secrets and variables → Actions → New secret → GCP_SA_KEY
-# Вміст — повний JSON з файлу gcp-sa-key.json
+Kubeconfig output (for quick kubectl):
 
-# (опц.) видалити старі ключі
-gcloud iam service-accounts keys list --iam-account="$SA_EMAIL"
-gcloud iam service-accounts keys delete <KEY_ID> --iam-account="$SA_EMAIL"
+```bash
+KUBECONFIG=$(terraform output -raw kubeconfig_path) kubectl get nodes -o wide
+```
+
+Destroy locally:
+
+```bash
+terraform destroy -auto-approve
 ```
 
 ---
 
-## Troubleshooting (gke-iac)
+## GitHub Actions workflows
 
-* **403 до GCS backend**
-  Немає `roles/storage.objectAdmin` для `${SA_EMAIL}` на бакеті `gs://${TF_BUCKET}`.
+### Create GKE + Flux (CLI)
 
-* **Terraform не бачить кластер/мережу**
-  Перевір `GCP_PROJECT_ID` / `GCP_REGION` / `GCP_ZONE` та увімкнені API `container`, `compute`.
+Workflow: `.github/workflows/create-gke.yaml`
 
-* **Flux bootstrap впав на SOPS/KMS**
-  Це вже зона репозиторію **gitops** (ключі KMS/Secret Manager, SOPS‑правила). У цьому репо можна тимчасово запускати з `bootstrap=false`.
+* **Inputs:**
+
+  * `apply` (bool, default: `true`) — if `false`, runs plan/validate only.
+  * `bootstrap` (bool, default: `true`) — run **Flux CLI bootstrap** after apply.
+* **What it does:**
+
+  1. Auth to GCP using `GCP_SA_KEY`.
+  2. `terraform init` + `apply` (creates VPC/Subnet + GKE Autopilot + kubeconfig + GH deploy key).
+  3. If `bootstrap = true`: fetch kube-context and run
+
+     ```bash
+     flux bootstrap github \
+       --owner=mexxo-dvp \
+       --repository=gitops \
+       --branch=main \
+       --path=clusters/gke \
+       --personal \
+       --token-auth
+     flux reconcile source git flux-system -n flux-system
+     flux reconcile kustomization flux-system -n flux-system --with-source
+     ```
+
+> After bootstrap, Flux reads from **`mexxo-dvp/gitops` → `clusters/gke`**. Configure SOPS/KMS and app manifests **in that repo**.
+
+### Destroy GKE
+
+Workflow: `.github/workflows/destroy-gke.yaml`
+
+* Runs `terraform destroy` with the same backend and variables.
+* If destroy fails (locks, drift), it performs a **legacy cleanup**:
+
+  * Detects cluster location via `gcloud`, deletes the cluster, removes legacy TF state addresses, then retries a final destroy.
 
 ---
 
-## Прибирання витрат
+## Variables (high level)
 
-```bash
-# приклад: регіональний
-gcloud container clusters delete main --region europe-west1
+See `variables.tf` for full descriptions.
 
-# приклад: ще один зональний
-gcloud container clusters delete demo-cluster --zone europe-west3-a
-```
+| Variable       | Default          | Notes                                     |
+| -------------- | ---------------- | ----------------------------------------- |
+| `project`      | —                | **Required** GCP project ID               |
+| `region`       | `europe-west1`   | Regional Autopilot cluster                |
+| `zone`         | `europe-west1-b` | For tools/compat                          |
+| `cluster_name` | `gke-flux`       | Cluster name                              |
+| `github_owner` | `mexxo-dvp`      | For deploy key target repo                |
+| `github_repo`  | `gitops`         | Deploy key added here                     |
+| `github_token` | empty            | PAT (classic) if you wire TF → GitHub ops |
+| `flux_path`    | `clusters/gke`   | Used by bootstrap workflow                |
 
 ---
 
-## Destroy
+## Workload Identity
 
-Модуль виставляє `deletion_protection = false`, тому стандартний destroy працює:
+The cluster is created with **WI enabled** (`workload_pool = "${project}.svc.id.goog"`). Once Flux is bootstrapped, annotate in the **GitOps repo** the service accounts that need GCP access (e.g., Flux controllers to decrypt SOPS files using GCP KMS). We used annotations like:
 
-```bash
-terraform destroy -var-file=vars.tfvars
+```yaml
+metadata:
+  annotations:
+    iam.gke.io/gcp-service-account: "flux-kustomize@<PROJECT_ID>.iam.gserviceaccount.com"
 ```
+
+Make sure that GSA has the right **KMS Decrypter** role on your key, and its **Workload Identity User** bindings include the target KSA(s).
+
+---
+
+## Cost & lifecycle notes
+
+* **Autopilot** bills per Pod/vCPU/memory + cluster fee; costs vary by region and usage.
+* Changing `region` or IP ranges will **recreate** networking and cluster.
+* `deletion_protection = false` is intentional for CI/CD automation.
+
+---
+
+## Troubleshooting
+
+**Backend “bucket not found”**
+Create the bucket and/or update `backend.tf` to your bucket name; ensure the CI SA has `roles/storage.objectAdmin` on it.
+
+**`google-github-actions/auth` fails**
+Double‑check `GCP_SA_KEY` is a **valid JSON** for a service account in the selected project and that APIs are enabled.
+
+**GitHub deploy key step fails**
+`GH_TOKEN` must be a PAT (classic) with scopes `repo` and `admin:public_key`, and the `github_owner/repo` must exist.
+
+**Flux bootstrap errors**
+Confirm the cluster is reachable (`kubectl cluster-info` using the emitted kubeconfig), and that your GitOps repo path exists (`clusters/gke`). If you use SOPS + GCP KMS in that repo, verify the **key project/region** and **Workload Identity** bindings are correct.
+
+**Kubeconfig not found on local machine**
+The kubeconfig path is created on the **runner**. For local runs, use `terraform output -raw kubeconfig_path` immediately after apply.
+
+---
