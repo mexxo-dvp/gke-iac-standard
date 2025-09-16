@@ -1,31 +1,42 @@
 # GKE IaC (Terraform) — робочий гайд
-Репозиторії
 
-Модуль: tf-google-gke-cluster (GitHub: github.com/mexxo-dvp/tf-google-gke-cluster)
-В ньому описані ресурси google_container_cluster та google_container_node_pool.
-Ключові фікси:
+> Це **root**‑репозиторій `gke-iac`, який створює/керує кластерами **GKE** через Terraform.
+> У репозиторії **gitops** ми нічого не змінювали, окрім ключів/секретів; bootstrap Flux тут лише підвʼязує кластер до вже підготовленого GitOps‑шляху.
 
-deletion_protection = false для можливості керованих замін/видалень.
+---
 
-Параметр GOOGLE_LOCATION (підтримує регіон або зону).
+## Репозиторії
 
-Root: gke-iac (цей репозиторій)
-Підтягує модуль вище, визначає вхідні змінні, tfvars, бекенд і робочі кроки.
+* **Модуль**: `github.com/mexxo-dvp/tf-google-gke-cluster`
 
-Передумови
+  * Описує ресурси `google_container_cluster` та `google_container_node_pool`.
+  * Ключові моменти:
 
-Працюємо в Google Cloud Shell (вже є gcloud, terraform).
+    * `deletion_protection = false` для керованих замін/видалень.
+    * Параметр `GOOGLE_LOCATION` (підтримує **регіон** або **зону**).
 
-## Активний проєкт:
+* **Root**: цей репозиторій (**gke-iac**)
+
+  * Підтягує модуль, визначає вхідні змінні, `tfvars`, бекенд, та CI‑workflow для створення GKE і (опційно) Flux bootstrap.
+
+---
+
+## Передумови (локально / Cloud Shell)
+
+* Активний проєкт:
 
 ```bash
 gcloud config get-value project
 ```
-Увімкнені API:
+
+* Увімкнені API:
+
 ```bash
 gcloud services enable container.googleapis.com compute.googleapis.com
 ```
-## Аутентифікація (ADC) — якщо були помилки токена
+
+* **ADC (Application Default Credentials)** — якщо були помилки токена локально:
+
 ```bash
 # прибрати поламані ADC
 unset GOOGLE_APPLICATION_CREDENTIALS
@@ -34,7 +45,7 @@ rm -f ~/.config/gcloud/application_default_credentials.json
 # нові ADC
 gcloud auth application-default login --quiet
 
-# прив’язати квоти до проєкту
+# привʼязати квоти до проєкту
 PROJECT_ID=$(gcloud config get-value project)
 gcloud auth application-default set-quota-project "$PROJECT_ID"
 
@@ -42,17 +53,29 @@ gcloud auth application-default set-quota-project "$PROJECT_ID"
 gcloud auth application-default print-access-token | head -c 20; echo
 ```
 
-## Структура root-репо (gke-iac/)
-```text
+---
+
+## Структура (root `gke-iac/`)
+
+```
 gke-iac/
+├─ .github/
+|  └─workflows/
+|   ├─create-gke.yaml
+|   └─destroy-gke.yaml
 ├─ main.tf
 ├─ variables.tf
 ├─ vars.tfvars
 ├─ backend.tf
+├─ outputs.tf
+├─ providers.tf
+├─ versions.tf
 ├─ .gitignore
-└─ README.md  ← цей файл
+└─ README.md
 ```
-backend.tf (GCS бекенд)
+
+### `backend.tf` (GCS бекенд)
+
 ```hcl
 terraform {
   backend "gcs" {
@@ -61,7 +84,9 @@ terraform {
   }
 }
 ```
-variables.tf
+
+### `variables.tf`
+
 ```hcl
 variable "GOOGLE_PROJECT"  { type = string }
 variable "GOOGLE_REGION"   { type = string } # напр. "europe-west1"
@@ -72,32 +97,38 @@ variable "GKE_POOL_NAME"    { type = string, default = "main" }
 variable "GKE_MACHINE_TYPE" { type = string, default = "g1-small" }
 variable "GKE_NUM_NODES"    { type = number, default = 1 }
 ```
-vars.tfvars
+
+### `vars.tfvars`
+
 ```hcl
-GOOGLE_PROJECT  = "type-your-pattern-name"
-GOOGLE_REGION   = "europe-west1"
-GOOGLE_LOCATION = "europe-west1-b"
+GOOGLE_PROJECT   = "<YOUR_PROJECT_ID>"
+GOOGLE_REGION    = "europe-west1"
+GOOGLE_LOCATION  = "europe-west1-b"
 GKE_CLUSTER_NAME = "main-z"
 GKE_POOL_NAME    = "main"
 GKE_MACHINE_TYPE = "g1-small"
 GKE_NUM_NODES    = 1
 ```
-main.tf (root, підключає модуль)
+
+### `main.tf` (root, підключає модуль)
+
 ```hcl
 module "gke_cluster" {
   source = "github.com/mexxo-dvp/tf-google-gke-cluster"
 
   GOOGLE_PROJECT   = var.GOOGLE_PROJECT
   GOOGLE_REGION    = var.GOOGLE_REGION
-  GOOGLE_LOCATION  = var.GOOGLE_LOCATION   # тут передаємо ЗОНУ для зонального кластера
+  GOOGLE_LOCATION  = var.GOOGLE_LOCATION   # для зонального кластера — передаємо ЗОНУ
   GKE_CLUSTER_NAME = var.GKE_CLUSTER_NAME
   GKE_POOL_NAME    = var.GKE_POOL_NAME
   GKE_MACHINE_TYPE = var.GKE_MACHINE_TYPE
   GKE_NUM_NODES    = var.GKE_NUM_NODES
 }
 ```
-.gitignore
-```pgsql
+
+### `.gitignore`
+
+```gitignore
 .terraform/
 *.tfstate*
 *.tfplan
@@ -107,16 +138,19 @@ override.tf.json
 plan.json
 .terraform.lock.hcl
 ```
-## Модуль (tf-google-gke-cluster/) — ключові моменти
 
-У ресурсі кластера обов’язково:
+---
+
+## Модуль: ключові моменти (для довідки)
+
 ```hcl
 resource "google_container_cluster" "this" {
   name     = var.GKE_CLUSTER_NAME
-  location = var.GOOGLE_LOCATION    # підтримує регіон або зону
-  deletion_protection = false       # критично, щоби Terraform міг знищити/замінити
-  remove_default_node_pool = true
-  initial_node_count       = 1
+  location = var.GOOGLE_LOCATION       # регіон або зона
+
+  deletion_protection       = false    # критично для керованих destroy/replace
+  remove_default_node_pool  = true
+  initial_node_count        = 1
 
   workload_identity_config {
     workload_pool = "${var.GOOGLE_PROJECT}.svc.id.goog"
@@ -126,9 +160,7 @@ resource "google_container_cluster" "this" {
     workload_metadata_config { mode = "GKE_METADATA" }
   }
 }
-```
-Нодпул:
-```hcl
+
 resource "google_container_node_pool" "this" {
   name       = var.GKE_POOL_NAME
   project    = var.GOOGLE_PROJECT
@@ -141,94 +173,191 @@ resource "google_container_node_pool" "this" {
   }
 }
 ```
-Варіанти variables.tf у модулі мають збігатися з root.
 
-## Створення GCS-бакета під state
+> Змінні в модулі та у root мають збігатися.
+
+---
+
+## GCS‑бакет під Terraform state
+
 ```bash
 PROJECT_ID=$(gcloud config get-value project)
 BUCKET="tf-state-${PROJECT_ID}"
 
-# cтворити бакет у тому ж регіоні, що й кластер (рекомендація)
+# створити бакет (рекомендовано у тому ж регіоні, що й кластер)
 gsutil mb -l europe-west1 "gs://${BUCKET}"
 
-# (рекомендовано) ввімкнути версіонування
+# ввімкнути версіонування
 gsutil versioning set on "gs://${BUCKET}"
 ```
-У backend.tf вписати цей bucket.
+
+Потім пропишіть `bucket` у `backend.tf` і зробіть `terraform init` (погодьтеся на міграцію локального стейту, якщо буде запропоновано).
+
+---
 
 ## Ініціалізація, план і аплай
 
-Якщо вперше підключаєте GCS-бекенд — Terraform запитає про міграцію локального стейту в GCS.
 ```bash
-cd ~/gke-iac
-
 terraform init -upgrade
 terraform fmt -recursive
 terraform validate
 
-# (опційно) створити workspace для зонального сценарію
+# (опц.) окремий workspace для сценарію
 terraform workspace new zonal || terraform workspace select zonal
 
 # план і аплай
-terraform plan -var-file=vars.tfvars -out=zonal.tfplan
+terraform plan   -var-file=vars.tfvars -out=zonal.tfplan
 terraform apply "zonal.tfplan"
 ```
-Очікуваний результат: створиться зональний кластер main-z у europe-west1-b з 1 нодою типу g1-small.
+
+**Очікувано**: створиться **зональний** кластер `main-z` у `europe-west1-b` з 1 нодою типу `g1-small`.
+
+---
 
 ## Перевірка кластера
+
 ```bash
-# огляд
+# огляд кластерів
 gcloud container clusters list --format='table(name,location,status)'
 
-# нодпули (саме ЗОНАЛЬНОГО кластера)
+# нодпули (для зонального кластера)
 gcloud container node-pools list --cluster main-z --zone europe-west1-b \
   --format='table(name,initialNodeCount,locations)'
 
-# контекст і ноди
+# kube‑контекст і ноди
 gcloud container clusters get-credentials main-z --zone europe-west1-b
 kubectl get nodes -o wide
 ```
+
 Приклад (очікувано 1 нода):
-```css
-NAME                            STATUS   ROLES   AGE   VERSION               INTERNAL-IP   EXTERNAL-IP   ...
+
+```
+NAME                            STATUS   ROLES   AGE   VERSION               INTERNAL-IP   EXTERNAL-IP
 gke-main-z-main-xxxxxxx-xxxx    Ready    <none>  ...   v1.33.x-gke.xxxxx     10.132.x.x    34.xxx.xx.x
 ```
-## Infracost
+
+---
+
+## Infracost (опційно)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
-```
-Оцінка:
-```bash
+
 terraform show -json zonal.tfplan > plan.json
 infracost breakdown --path plan.json
-
-# (опційно) різниця планів
+# (опц.) різниця планів
 infracost diff --path plan.json
 ```
-Результат з нашого сетапу (1 нода, g1-small): ~$92/міс
-(Cluster mgmt fee ~$73 + інстанс ~$15 + PD ~$4)
 
-## Ремоут-стейт: перевірка
-Terraform зберігає стейт у бакеті, наприклад:
-```perl
-gs://tf-state-<PROJECT_ID>/gke-iac/terraform-state/zonal.tfstate
-```
+> Орієнтовно (1 нода `g1-small`): \~ **\$92/міс** (Cluster mgmt fee \~\$73 + інстанс \~\$15 + PD \~\$4).
 
-Перевірка:
+---
+
+## Ремоут‑стейт: перевірка
+
 ```bash
-# витягнути bucket/prefix/workspace з локальної мети
-BUCKET=$(jq -r '.backend.config.bucket' .terraform/terraform.tfstate)
-PREFIX=$(jq -r '.backend.config.prefix' .terraform/terraform.tfstate)
+BUCKET=$(jq -r '.backend.config.bucket'  .terraform/terraform.tfstate)
+PREFIX=$(jq -r '.backend.config.prefix'  .terraform/terraform.tfstate)
 WS=$(terraform workspace show)
 
 echo "bucket=${BUCKET}"
 echo "prefix=${PREFIX}"
 echo "workspace=${WS}"
 
-# подивитись об’єкт
 gsutil ls -l "gs://${BUCKET}/${PREFIX}/${WS}.tfstate"
 ```
-## Прибирання зайвих витрат
+
+---
+
+## CI/CD: GitHub Actions у цьому репозиторії
+
+### Обовʼязкові **Secrets** (repo **gke-iac**)
+
+* `GCP_SA_KEY` — **JSON ключ** сервісного акаунта для CI (Terraform/gcloud).
+* `GCP_PROJECT_ID` — напр. `fifth-diode-<...>`
+* `GCP_REGION` — напр. `europe-west1`
+* `GCP_ZONE` — напр. `europe-west1-b`
+* `GH_TOKEN` — **PAT** із правами `repo` + `admin:public_key` (потрібен, якщо вмикаєте Flux bootstrap до репо **gitops**).
+
+### Ролі для CI‑Service Account
+
+```bash
+SA_EMAIL="gha-ci@<PROJECT_ID>.iam.gserviceaccount.com"
+PROJECT_ID="<PROJECT_ID>"
+TF_BUCKET="tf-state-<PROJECT_ID>"
+
+# GKE / VPC
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${SA_EMAIL}" --role roles/container.admin
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:${SA_EMAIL}" --role roles/compute.networkAdmin
+
+# Доступ до GCS state
+gcloud storage buckets add-iam-policy-binding "gs://${TF_BUCKET}" \
+  --member "serviceAccount:${SA_EMAIL}" --role roles/storage.objectAdmin
+```
+
+### Workflow: **Create GKE + Flux (CLI)**
+
+* Файл: `.github/workflows/create-gke.yaml`
+* Запуск: **Actions → Create GKE + Flux (CLI) → Run workflow**
+* Інпути:
+
+  * `apply` — `true` виконує `terraform apply` (інакше тільки `plan`).
+  * `bootstrap` — `true` запускає `flux bootstrap` до репо **gitops** (ідемпотентно).
+
+**Що робить workflow**:
+
+1. `terraform init/plan/apply` з бекендом у GCS;
+2. `gcloud container clusters get-credentials` для нового кластера;
+3. (якщо `bootstrap=true`) `flux bootstrap github --owner=mexxo-dvp --repository=gitops --branch=main --path=clusters/gke --personal --token-auth`.
+
+> **Примітка:** у репозиторії **gitops** ми нічого не змінювали, окрім ключів/секретів. Flux bootstrap тут лише підвʼяже кластер до вашого GitOps‑шляху `clusters/gke`.
+
+### Як підключитись до кластера локально
+
+```bash
+gcloud container clusters get-credentials gke-flux \
+  --region "$GCP_REGION" --project "$GCP_PROJECT_ID"
+
+kubectl get nodes
+```
+
+### Ротація `GCP_SA_KEY` (для цього репо)
+
+```bash
+SA_EMAIL="gha-ci@<PROJECT_ID>.iam.gserviceaccount.com"
+PROJECT_ID="<PROJECT_ID>"
+
+gcloud iam service-accounts keys create gcp-sa-key.json \
+  --iam-account="$SA_EMAIL" --project "$PROJECT_ID"
+
+# Далі: Settings → Secrets and variables → Actions → New secret → GCP_SA_KEY
+# Вміст — повний JSON з файлу gcp-sa-key.json
+
+# (опц.) видалити старі ключі
+gcloud iam service-accounts keys list --iam-account="$SA_EMAIL"
+gcloud iam service-accounts keys delete <KEY_ID> --iam-account="$SA_EMAIL"
+```
+
+---
+
+## Troubleshooting (gke-iac)
+
+* **403 до GCS backend**
+  Немає `roles/storage.objectAdmin` для `${SA_EMAIL}` на бакеті `gs://${TF_BUCKET}`.
+
+* **Terraform не бачить кластер/мережу**
+  Перевір `GCP_PROJECT_ID` / `GCP_REGION` / `GCP_ZONE` та увімкнені API `container`, `compute`.
+
+* **Flux bootstrap впав на SOPS/KMS**
+  Це вже зона репозиторію **gitops** (ключі KMS/Secret Manager, SOPS‑правила). У цьому репо можна тимчасово запускати з `bootstrap=false`.
+
+---
+
+## Прибирання витрат
+
 ```bash
 # приклад: регіональний
 gcloud container clusters delete main --region europe-west1
@@ -236,9 +365,13 @@ gcloud container clusters delete main --region europe-west1
 # приклад: ще один зональний
 gcloud container clusters delete demo-cluster --zone europe-west3-a
 ```
-## Destroy (коли треба знести все)
 
-Наш модуль ставить deletion_protection = false, тому:
+---
+
+## Destroy
+
+Модуль виставляє `deletion_protection = false`, тому стандартний destroy працює:
+
 ```bash
 terraform destroy -var-file=vars.tfvars
 ```
