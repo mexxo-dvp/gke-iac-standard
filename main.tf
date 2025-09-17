@@ -1,42 +1,36 @@
 ############################################################
 # main.tf — GKE Standard (zonal) + cost-friendly defaults
 # Notes:
-# - Uses a separate VPC/Subnet
-# - Keeps Workload Identity
-# - Manages a small autoscaled node pool (1..2 e2-medium)
+# - Separate VPC/Subnet (safety)
+# - Workload Identity
+# - Small autoscaled node pool (1..2 e2-medium)
 ############################################################
 
-############################################################
-# 0) Locals (network names, ranges, cost knobs)
-############################################################
 locals {
-  # New, separate network (avoid collisions with old one)
   vpc_name        = "gke-vpc-std"
   subnet_name     = "gke-subnet-std"
   pods_range_name = "gke-pods-std"
   svcs_range_name = "gke-services-std"
 
-  # Non-overlapping CIDRs (adjust if they collide in your org)
   subnet_cidr   = "10.60.0.0/20"
   pods_cidr     = "10.80.0.0/14"
   services_cidr = "10.100.0.0/20"
 
-  # Cost knobs (keep small & stable)
-  node_machine_type = "e2-medium" # 2 vCPU / 4 GB — safe baseline
-  node_min_count    = 1           # keep 1 node for system pods
-  node_max_count    = 2           # light burst
+  node_machine_type = "e2-medium"
+  node_min_count    = 1
+  node_max_count    = 2
   node_disk_gb      = 30
   image_type        = "COS_CONTAINERD"
-  use_spot          = false # set true only if OK with evictions
+  use_spot          = false
 }
 
-############################################################
-# 1) VPC + Subnet with secondary ranges (VPC-native GKE)
-############################################################
+# --- Network ---
 resource "google_compute_network" "vpc_std" {
   name                    = local.vpc_name
   auto_create_subnetworks = false
-  # lifecycle { prevent_destroy = true } # optional safety
+
+  # Safety net so TF won't nuke the VPC by accident
+  lifecycle { prevent_destroy = true }
 }
 
 resource "google_compute_subnetwork" "gke_std" {
@@ -54,46 +48,41 @@ resource "google_compute_subnetwork" "gke_std" {
     ip_cidr_range = local.services_cidr
   }
 
-  # lifecycle { prevent_destroy = true } # optional safety
+  # Recommend to keep while migrating; remove when sure
+  lifecycle { prevent_destroy = true }
 }
 
-############################################################
-# 2) GKE Standard (zonal) + Workload Identity
-############################################################
+# --- Cluster ---
 resource "google_container_cluster" "this" {
   name     = var.cluster_name
-  # Zonal = cheaper; if you need regional HA, change to var.region
   location = var.zone
 
   network    = google_compute_network.vpc_std.self_link
   subnetwork = google_compute_subnetwork.gke_std.self_link
 
-  # Remove default pool; manage our own node pool below
   remove_default_node_pool = true
-  initial_node_count       = 1 # required by API
+  initial_node_count       = 1
 
-  release_channel {
-    channel = "STABLE"
-  }
+  release_channel { channel = "STABLE" }
 
   ip_allocation_policy {
     cluster_secondary_range_name  = local.pods_range_name
     services_secondary_range_name = local.svcs_range_name
   }
 
-  # Workload Identity (cluster part)
   workload_identity_config {
     workload_pool = "${var.project}.svc.id.goog"
   }
 
   deletion_protection = false
 
-  # lifecycle {
-  #   create_before_destroy = true  # useful when renaming clusters
-  # }
+  # Avoid downtime if name/settings change in future
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
-# Managed node pool (on-demand by default; tiny & autoscaled)
+# --- Node pool ---
 resource "google_container_node_pool" "default" {
   name     = "np-default"
   location = google_container_cluster.this.location
@@ -106,7 +95,13 @@ resource "google_container_node_pool" "default" {
 
   management {
     auto_repair  = true
-  auto_upgrade = true
+    auto_upgrade = true
+  }
+
+  # Rolling upgrades: keep capacity during upgrade
+  upgrade_settings {
+    max_surge       = 1
+    max_unavailable = 0
   }
 
   node_config {
@@ -114,33 +109,32 @@ resource "google_container_node_pool" "default" {
     disk_size_gb = local.node_disk_gb
     image_type   = local.image_type
 
-    # Use dedicated node service account if provided; otherwise default Compute SA is used by GKE
-    # (if left empty, your TF runner must have iam.serviceAccountUser on the default Compute SA)
+    # If empty, GKE uses default Compute SA (runner must have iam.serviceAccountUser on it)
     service_account = var.node_sa_email != "" ? var.node_sa_email : null
 
-    # Aggressive savings (eviction risk). Use ONE of the following depending on provider version.
-    # spot        = local.use_spot     # newer provider attribute
+    # Use ONE of the following depending on provider version (kept commented until needed)
+    # spot        = local.use_spot
+    # preemptible = local.use_spot
 
-    # Workload Identity (node part) — required on Standard
-    workload_metadata_config {
-      mode = "GKE_METADATA"
-    }
+    workload_metadata_config { mode = "GKE_METADATA" }
   }
 
   depends_on = [google_container_cluster.this]
+
+  # Let autoscaler/GKE adjust size without TF fighting back
+  lifecycle {
+    ignore_changes = [
+      # GKE may adjust underlying node_count during autoscaling/upgrade
+      node_count
+    ]
+  }
 }
 
-############################################################
-# 3) kubeconfig via official auth module → local file
-# NOTE: The auth module reads the cluster via data source.
-# Apply in two steps:
-#   a) create cluster & node pool (targeted)
-#   b) full apply to render kubeconfig
-############################################################
+# --- Kubeconfig output via auth module ---
 module "gke_auth_self" {
   source       = "terraform-google-modules/kubernetes-engine/google//modules/auth"
   project_id   = var.project
-  location     = var.zone # zonal cluster
+  location     = var.zone
   cluster_name = var.cluster_name
 
   depends_on = [google_container_cluster.this]
@@ -152,9 +146,7 @@ resource "local_file" "kubeconfig" {
   file_permission = "0600"
 }
 
-############################################################
-# 4) GitHub deploy key (RO)
-############################################################
+# --- GitHub deploy key (RO) ---
 module "tls_private_key" {
   source = "github.com/den-vasyliev/tf-hashicorp-tls-keys"
 }
