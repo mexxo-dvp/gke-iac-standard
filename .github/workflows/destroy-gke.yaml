@@ -53,7 +53,7 @@ jobs:
           fi
           gsutil rm -f "${LOCK_PATH}" || true
 
-      - name: Terraform Destroy (targeted: cluster + node pool)
+      - name: "Terraform Destroy (targeted: cluster + node pool)"
         if: ${{ inputs.destroy_all == false }}
         env:
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
