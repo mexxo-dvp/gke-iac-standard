@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       destroy_all:
-        description: "Destroy ALL TF resources (VPC/Subnet/etc.)? (default: false = only cluster + node pool)"
+        description: "Destroy ALL TF resources (VPC/Subnet/etc.)? Default false = only cluster + node pool."
         required: true
         type: boolean
         default: false
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_IN_AUTOMATION: "1"
-      CLUSTER_NAME: gke-flux-std   # ← zonal Standard cluster name
+      CLUSTER_NAME: gke-flux-std
 
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,6 @@ jobs:
         with:
           terraform_version: "1.8.5"
 
-      # best-effort: remove stale lock in GCS
       - name: Clear stale Terraform lock (best-effort)
         shell: bash
         run: |
@@ -54,7 +53,6 @@ jobs:
           fi
           gsutil rm -f "${LOCK_PATH}" || true
 
-      # A) Targeted destroy (default): only node pool + cluster
       - name: Terraform Destroy (targeted: cluster + node pool)
         if: ${{ inputs.destroy_all == false }}
         env:
@@ -73,12 +71,9 @@ jobs:
           terraform destroy -input=false -lock-timeout=10m -auto-approve \
             -target=google_container_node_pool.default \
             -target=google_container_cluster.this
-
-          # (optional) clean state for modules that depend on kubeconfig
           terraform state rm local_file.kubeconfig || true
           terraform state rm module.gke_auth_self || true
 
-      # B) Full destroy (optional): everything, incl. VPC/Subnet/etc.
       - name: Terraform Destroy (full stack)
         if: ${{ inputs.destroy_all == true }}
         env:
@@ -96,9 +91,8 @@ jobs:
           terraform init -input=false
           terraform destroy -input=false -lock-timeout=10m -auto-approve
 
-      # Fallback: if TF destroy fails, best-effort gcloud delete (detect zone/region)
       - name: Legacy cleanup (detect location, gcloud delete)
-        if: failure() && inputs.destroy_all == false
+        if: ${{ failure() && inputs.destroy_all == false }}
         env:
           PROJECT_ID:   ${{ secrets.GCP_PROJECT_ID }}
           CLUSTER_NAME: ${{ env.CLUSTER_NAME }}

@@ -46,30 +46,27 @@ jobs:
           terraform_version: "1.8.5"
 
       - name: Terraform (create cluster & node pool first)
-        if: ${{ inputs.apply == true }}
+        if: ${{ inputs.apply }}
         env:
-          # GitHub provider (PAT)
           GITHUB_TOKEN:                 ${{ secrets.GH_TOKEN }}
-          # TF vars
           TF_VAR_project:               ${{ secrets.GCP_PROJECT_ID }}
           TF_VAR_region:                ${{ secrets.GCP_REGION }}
           TF_VAR_zone:                  ${{ secrets.GCP_ZONE }}
           TF_VAR_cluster_name:          gke-flux-std
           TF_VAR_github_owner:          mexxo-dvp
           TF_VAR_github_repo:           gitops
-          TF_VAR_github_token:          ${{ secrets.GH_TOKEN }}   # explicit for provider
+          TF_VAR_github_token:          ${{ secrets.GH_TOKEN }}
           TF_VAR_flux_path:             clusters/gke
         shell: bash
         run: |
           set -euo pipefail
           terraform init -input=false
-          # step 1: create only GKE resources so auth-module doesn't fail
           terraform apply -input=false -auto-approve \
             -target=google_container_cluster.this \
             -target=google_container_node_pool.default
 
       - name: Terraform (full apply incl. kubeconfig output)
-        if: ${{ inputs.apply == true }}
+        if: ${{ inputs.apply }}
         env:
           GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
@@ -86,7 +83,7 @@ jobs:
           terraform apply -input=false -auto-approve
 
       - name: Terraform plan only (no changes)
-        if: ${{ inputs.apply == false }}
+        if: ${{ !inputs.apply }}
         env:
           GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
@@ -101,13 +98,12 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -input=false
-          # plan only on GKE targets to avoid data-source failures
           terraform plan -no-color -input=false \
             -target=google_container_cluster.this \
             -target=google_container_node_pool.default
 
       - name: Flux bootstrap (CLI)
-        if: ${{ inputs.bootstrap == true && inputs.apply == true }}
+        if: ${{ inputs.bootstrap && inputs.apply }}
         env:
           GITHUB_TOKEN:   ${{ secrets.GH_TOKEN }}
           GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
@@ -116,14 +112,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # kube-context for ZONAL cluster
           gcloud container clusters get-credentials "$CLUSTER_NAME" --zone "$GOOGLE_ZONE" --project "$GOOGLE_PROJECT"
-
-          # flux cli
           curl -s https://fluxcd.io/install.sh | sudo bash
           flux check --pre
-
-          # GitOps bootstrap to the mexxo-dvp/gitops repo, branch main, path clusters/gke
           flux bootstrap github \
             --owner=mexxo-dvp \
             --repository=gitops \
@@ -131,7 +122,5 @@ jobs:
             --path=clusters/gke \
             --personal \
             --token-auth
-
-          # First reconcile
           flux reconcile source git flux-system -n flux-system
           flux reconcile kustomization flux-system -n flux-system --with-source
