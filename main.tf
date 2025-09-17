@@ -61,7 +61,7 @@ resource "google_compute_subnetwork" "gke_std" {
 # 2) GKE Standard (zonal) + Workload Identity
 ############################################################
 resource "google_container_cluster" "this" {
-  name = var.cluster_name
+  name     = var.cluster_name
   # Zonal = cheaper; if you need regional HA, change to var.region
   location = var.zone
 
@@ -106,7 +106,7 @@ resource "google_container_node_pool" "default" {
 
   management {
     auto_repair  = true
-    auto_upgrade = true
+  auto_upgrade = true
   }
 
   node_config {
@@ -114,9 +114,12 @@ resource "google_container_node_pool" "default" {
     disk_size_gb = local.node_disk_gb
     image_type   = local.image_type
 
+    # Use dedicated node service account if provided; otherwise default Compute SA is used by GKE
+    # (if left empty, your TF runner must have iam.serviceAccountUser on the default Compute SA)
+    service_account = var.node_sa_email != "" ? var.node_sa_email : null
+
     # Aggressive savings (eviction risk). Use ONE of the following depending on provider version.
     # spot        = local.use_spot     # newer provider attribute
-    # preemptible = local.use_spot     # legacy attribute
 
     # Workload Identity (node part) — required on Standard
     workload_metadata_config {

@@ -23,7 +23,7 @@
      * Svcs   → `gke-services-std` = `10.100.0.0/20`
 2. **Кластер GKE Autopilot** (регіональний; `release_channel = STABLE`) з **Workload Identity**:
 
-   * Назва кластера → `var.cluster_name` (за замовчуванням `gke-flux`)
+   * Назва кластера → `var.cluster_name` (за замовчуванням `gke-flux-std`)
    * Регіон → `var.region` (за замовчуванням `europe-west1`)
    * `workload_identity_config.workload_pool = "${var.project}.svc.id.goog"`
    * `deletion_protection = false` (дозволяє заміни/видалення з Terraform)
@@ -281,11 +281,11 @@ metadata:
 ---
 <a id="en"></a>
 
-# GKE IaC (Terraform) — Autopilot + Flux bootstrap (via CLI) {#en}
+# GKE IaC (Terraform) — Standard + Flux bootstrap (via CLI) {#en}
 
-This repo provisions **a VPC‑native GKE Autopilot cluster** with **Workload Identity** and writes a local **kubeconfig**. A GitHub deploy key (read‑only) is created for your GitOps repo. Optionally, a GitHub Actions workflow can **bootstrap Flux** into the cluster.
+This repo provisions **a VPC‑native GKE Standard cluster** with **Workload Identity** and writes a local **kubeconfig**. A GitHub deploy key (read‑only) is created for your GitOps repo. Optionally, a GitHub Actions workflow can **bootstrap Flux** into the cluster.
 
-> **Repo you’re reading:** `gke-iac` (root IaC)
+> **Repo you’re reading:** `gke-iac-std` (root IaC)
 >
 > **Related GitOps repo (manifests + SOPS/Flux):** `mexxo-dvp/gitops` (consumed by Flux after bootstrap)
 
@@ -296,14 +296,14 @@ This repo provisions **a VPC‑native GKE Autopilot cluster** with **Workload Id
 1. **VPC & Subnet** (VPC‑native):
 
    * VPC: `gke-vpc`
-   * Subnet: `gke-subnet` (`10.10.0.0/20`)
+   * Subnet: `gke-subnet-std` (`10.40.0.0/20`)
    * Secondary ranges:
 
-     * Pods   → `gke-pods` = `10.20.0.0/14`
-     * Svcs   → `gke-services` = `10.40.0.0/20`
+     * Pods   → `gke-pods-std` = `10.60.0.0/14`
+     * Svcs   → `gke-services-std` = `10.100.0.0/20`
 2. **GKE Autopilot cluster** (regional; `release_channel = STABLE`), with **Workload Identity**:
 
-   * Cluster name → `var.cluster_name` (default `gke-flux`)
+   * Cluster name → `var.cluster_name` (default `gke-flux-std`)
    * Region → `var.region` (default `europe-west1`)
    * `workload_identity_config.workload_pool = "${var.project}.svc.id.goog"`
    * `deletion_protection = false` (allows replacements/destroys from TF)

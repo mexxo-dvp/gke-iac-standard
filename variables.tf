@@ -25,6 +25,14 @@ variable "cluster_name" {
   default     = "gke-flux-std"
 }
 
+# Explicit node service account to avoid TF needing iam.serviceAccountUser on default Compute SA.
+# Example: "gke-node@fifth-diode-472114-p7.iam.gserviceaccount.com"
+variable "node_sa_email" {
+  type        = string
+  description = "Service account email for GKE nodes. Leave empty to use default Compute SA."
+  default     = ""
+}
+
 # --- Flux / GitHub ---
 variable "github_owner" {
   type        = string
