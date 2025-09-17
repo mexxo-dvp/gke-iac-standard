@@ -46,7 +46,7 @@ jobs:
           terraform_version: "1.8.5"
 
       - name: Terraform (create cluster & node pool first)
-        if: ${{ inputs.apply }}
+        if: ${{ inputs.apply == true }}
         env:
           GITHUB_TOKEN:                 ${{ secrets.GH_TOKEN }}
           TF_VAR_project:               ${{ secrets.GCP_PROJECT_ID }}
@@ -66,7 +66,7 @@ jobs:
             -target=google_container_node_pool.default
 
       - name: Terraform (full apply incl. kubeconfig output)
-        if: ${{ inputs.apply }}
+        if: ${{ inputs.apply == true }}
         env:
           GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
@@ -83,7 +83,7 @@ jobs:
           terraform apply -input=false -auto-approve
 
       - name: Terraform plan only (no changes)
-        if: ${{ !inputs.apply }}
+        if: ${{ inputs.apply == false }}
         env:
           GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
@@ -103,7 +103,7 @@ jobs:
             -target=google_container_node_pool.default
 
       - name: Flux bootstrap (CLI)
-        if: ${{ inputs.bootstrap && inputs.apply }}
+        if: ${{ inputs.bootstrap == true && inputs.apply == true }}
         env:
           GITHUB_TOKEN:   ${{ secrets.GH_TOKEN }}
           GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
