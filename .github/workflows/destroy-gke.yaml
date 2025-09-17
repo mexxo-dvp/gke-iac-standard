@@ -15,7 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_IN_AUTOMATION: "1"
-      # Імена з твоєї інфи:
       CLUSTER_NAME: gke-flux-std
       VPC_NAME: gke-vpc-std
       SUBNET_NAME: gke-subnet-std
