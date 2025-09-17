@@ -45,6 +45,17 @@ jobs:
         with:
           terraform_version: "1.8.5"
 
+      - name: Clear stale Terraform lock (best-effort)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUCKET=$(grep -E 'bucket *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/')
+          PREFIX=$(grep -E 'prefix *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/' || true)
+          LOCK_PATH="gs://${BUCKET}/${PREFIX:+$PREFIX/}default.tflock"
+          echo "Removing lock at: ${LOCK_PATH}"
+          gsutil rm -f "${LOCK_PATH}" || true
+
       - name: Terraform (create cluster & node pool first)
         if: ${{ inputs.apply == true }}
         env:
@@ -61,47 +72,47 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          terraform init -input=false
-          terraform apply -input=false -auto-approve \
+          terraform init -input=false -lock-timeout=10m
+          terraform apply -input=false -auto-approve -lock-timeout=10m \
             -target=google_container_cluster.this \
             -target=google_container_node_pool.default
 
       - name: Terraform (full apply incl. kubeconfig output)
         if: ${{ inputs.apply == true }}
         env:
-          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
-          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:       ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name: gke-flux-std
-          TF_VAR_github_owner: mexxo-dvp
-          TF_VAR_github_repo:  gitops
-          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
-          TF_VAR_flux_path:    clusters/gke
+          GITHUB_TOKEN:         ${{ secrets.GH_TOKEN }}
+          TF_VAR_project:       ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:        ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:          ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name:  gke-flux-std
+          TF_VAR_github_owner:  mexxo-dvp
+          TF_VAR_github_repo:   gitops
+          TF_VAR_github_token:  ${{ secrets.GH_TOKEN }}
+          TF_VAR_flux_path:     clusters/gke
           TF_VAR_node_sa_email: gke-node@fifth-diode-472114-p7.iam.gserviceaccount.com
         shell: bash
         run: |
           set -euo pipefail
-          terraform apply -input=false -auto-approve
+          terraform apply -input=false -auto-approve -lock-timeout=10m
 
       - name: Terraform plan only (no changes)
         if: ${{ inputs.apply == false }}
         env:
-          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
-          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:       ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name: gke-flux-std
-          TF_VAR_github_owner: mexxo-dvp
-          TF_VAR_github_repo:  gitops
-          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
-          TF_VAR_flux_path:    clusters/gke
+          GITHUB_TOKEN:         ${{ secrets.GH_TOKEN }}
+          TF_VAR_project:       ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:        ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:          ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name:  gke-flux-std
+          TF_VAR_github_owner:  mexxo-dvp
+          TF_VAR_github_repo:   gitops
+          TF_VAR_github_token:  ${{ secrets.GH_TOKEN }}
+          TF_VAR_flux_path:     clusters/gke
           TF_VAR_node_sa_email: gke-node@fifth-diode-472114-p7.iam.gserviceaccount.com
         shell: bash
         run: |
           set -euo pipefail
-          terraform init -input=false
-          terraform plan -no-color -input=false \
+          terraform init -input=false -lock-timeout=10m
+          terraform plan -no-color -input=false -lock-timeout=10m \
             -target=google_container_cluster.this \
             -target=google_container_node_pool.default
 
