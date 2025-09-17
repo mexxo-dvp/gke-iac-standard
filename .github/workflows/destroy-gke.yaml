@@ -1,7 +1,13 @@
 name: Destroy GKE
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      destroy_all:
+        description: "Destroy ALL TF resources (VPC/Subnet/etc.)? (default: false = only cluster + node pool)"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -15,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_IN_AUTOMATION: "1"
-      CLUSTER_NAME: gke-flux
+      CLUSTER_NAME: gke-flux-std   # ← zonal Standard cluster name
 
     steps:
       - uses: actions/checkout@v4
@@ -26,26 +32,15 @@ jobs:
           export_environment_variables: true
 
       - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
 
-      # 0) install Terraform
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.8.5"
 
-      # 0.1) fallback: if for some reason terraform is still not in the PATH
-      - name: Ensure Terraform present (fallback)
-        run: |
-          if ! command -v terraform >/dev/null 2>&1; then
-            echo "Terraform not found, installing fallback..."
-            curl -fsSL https://releases.hashicorp.com/terraform/1.8.5/terraform_1.8.5_linux_amd64.zip -o /tmp/tf.zip
-            sudo unzip -o /tmp/tf.zip -d /usr/local/bin
-            terraform -version
-          else
-            terraform -version
-          fi
-
-      # best-effort: remove stuck lock in GCS
+      # best-effort: remove stale lock in GCS
       - name: Clear stale Terraform lock (best-effort)
         shell: bash
         run: |
@@ -59,10 +54,9 @@ jobs:
           fi
           gsutil rm -f "${LOCK_PATH}" || true
 
-      # 1) normal destroy
-      - name: Terraform Destroy (try)
-        id: tf_destroy
-        continue-on-error: true
+      # A) Targeted destroy (default): only node pool + cluster
+      - name: Terraform Destroy (targeted: cluster + node pool)
+        if: ${{ inputs.destroy_all == false }}
         env:
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
           TF_VAR_region:       ${{ secrets.GCP_REGION }}
@@ -74,24 +68,45 @@ jobs:
           TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
           GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
+          terraform init -input=false
+          terraform destroy -input=false -lock-timeout=10m -auto-approve \
+            -target=google_container_node_pool.default \
+            -target=google_container_cluster.this
+
+          # (optional) clean state for modules that depend on kubeconfig
+          terraform state rm local_file.kubeconfig || true
+          terraform state rm module.gke_auth_self || true
+
+      # B) Full destroy (optional): everything, incl. VPC/Subnet/etc.
+      - name: Terraform Destroy (full stack)
+        if: ${{ inputs.destroy_all == true }}
+        env:
+          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:       ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name: ${{ env.CLUSTER_NAME }}
+          TF_VAR_github_owner: mexxo-dvp
+          TF_VAR_github_repo:  gitops
+          TF_VAR_flux_path:    clusters/gke
+          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
+        run: |
+          set -euo pipefail
           terraform init -input=false
           terraform destroy -input=false -lock-timeout=10m -auto-approve
 
-      # 2) fallback: find location (zone/region) and delete cluster + clear state
-      - name: Legacy cleanup (detect location, gcloud delete, state rm)
-        if: steps.tf_destroy.outcome == 'failure'
+      # Fallback: if TF destroy fails, best-effort gcloud delete (detect zone/region)
+      - name: Legacy cleanup (detect location, gcloud delete)
+        if: failure() && inputs.destroy_all == false
         env:
           PROJECT_ID:   ${{ secrets.GCP_PROJECT_ID }}
           CLUSTER_NAME: ${{ env.CLUSTER_NAME }}
         run: |
           set -euxo pipefail
-          echo "Terraform destroy failed — running legacy cleanup..."
-
           LOC=$(gcloud container clusters list --project "$PROJECT_ID" \
                  --filter="name=$CLUSTER_NAME" --format="value(location)" | head -n1 || true)
           echo "Detected cluster location: ${LOC:-<none>}"
-
           if [[ -n "${LOC:-}" ]]; then
             if [[ "$LOC" =~ -[a-z]$ ]]; then
               gcloud container clusters delete "$CLUSTER_NAME" --zone "$LOC" --project "$PROJECT_ID" --quiet || true
@@ -99,40 +114,3 @@ jobs:
               gcloud container clusters delete "$CLUSTER_NAME" --region "$LOC" --project "$PROJECT_ID" --quiet || true
             fi
           fi
-
-          terraform init -input=false
-
-          # прибираємо з state старі адреси module.gke.* та module.gke_auth_self.*
-          mapfile -t LEGACY < <(terraform state list | sed -n 's/^\(module\.gke\..*\)$/\1/p; s/^\(module\.gke_auth_self\..*\)$/\1/p')
-          if [ "${#LEGACY[@]}" -gt 0 ]; then
-            for addr in "${LEGACY[@]}"; do
-              echo "Removing legacy state: $addr"
-              terraform state rm "$addr" || true
-            done
-          fi
-
-          # прибрати ресурси, що вимагають kubeconfig на раннері
-          for addr in local_file.kubeconfig module.flux_bootstrap_gke.flux_bootstrap_git.this; do
-            if terraform state list | grep -q "^$addr$"; then
-              echo "Removing state: $addr"
-              terraform state rm "$addr" || true
-            fi
-          done
-
-      # 3) final pass
-      - name: Terraform Destroy (final pass)
-        if: always()
-        env:
-          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:       ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name: ${{ env.CLUSTER_NAME }}
-          TF_VAR_github_owner: mexxo-dvp
-          TF_VAR_github_repo:  gitops
-          TF_VAR_flux_path:    clusters/gke
-          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
-          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
-        run: |
-          set -e
-          terraform init -input=false
-          terraform destroy -input=false -lock-timeout=10m -auto-approve || true

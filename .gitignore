@@ -1,16 +1,26 @@
+# Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
-*.tfplan
 crash.log
 override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-vars.tfvars
-terraform.tfvars
-plan.json
-application_default_credentials.json
 
-# local temp state snapshots
-state*.json
+# Vars / secrets
+*.tfvars
+*.tfvars.json
+sa.json
+
+# Kube
+.kube/
+kubeconfig
+kubeconfig.*
+
+# Misc
+.env
+*.pem
+*.key
+id_rsa*
+.DS_Store

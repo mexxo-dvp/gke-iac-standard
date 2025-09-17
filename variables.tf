@@ -1,5 +1,5 @@
 #############################
-# variables.tf (Autopilot + WI)
+# variables.tf (Standard GKE + WI)
 #############################
 
 variable "project" {
@@ -9,20 +9,20 @@ variable "project" {
 
 variable "region" {
   type        = string
-  description = "GCP region (e.g., europe-west1)"
+  description = "GCP region used for networking and regional resources (e.g., europe-west1)"
   default     = "europe-west1"
 }
 
 variable "zone" {
   type        = string
-  description = "Optional GCP zone (e.g., europe-west1-b) for tools/compat"
+  description = "GCP zone for the zonal Standard cluster (e.g., europe-west1-b)"
   default     = "europe-west1-b"
 }
 
 variable "cluster_name" {
   type        = string
-  description = "GKE Autopilot cluster name"
-  default     = "gke-flux"
+  description = "GKE cluster name (Standard, zonal)"
+  default     = "gke-flux-std"
 }
 
 # --- Flux / GitHub ---
@@ -40,7 +40,7 @@ variable "github_repo" {
 
 variable "github_token" {
   type        = string
-  description = "GitHub PAT (classic) with repo scope for bootstrap (use ONLY if you enable TF bootstrap)"
+  description = "GitHub PAT (classic) with repo scope (used by Terraform GitHub provider if enabled)"
   sensitive   = true
   default     = ""
 }

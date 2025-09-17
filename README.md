@@ -1,11 +1,11 @@
 <a id="ua"></a>
 [UA](#ua) | [EN](#en)
 
-# GKE IaC (Terraform) — Autopilot + Flux bootstrap (via CLI) {#ua}
+# GKE IaC (Terraform) — Standard + Flux bootstrap (via CLI) {#ua}
 
-Цей репозиторій розгортає **VPC‑native кластер GKE Autopilot** з увімкненим **Workload Identity** і формує локальний **kubeconfig**. Для вашого GitOps‑репозиторію створюється **GitHub deploy key (read‑only)**. Додатково, GitHub Actions‑workflow може **запустити Flux bootstrap** через CLI після готовності кластера.
+Цей репозиторій розгортає **VPC‑native кластер GKE Standard** з увімкненим **Workload Identity** і формує локальний **kubeconfig**. Для вашого GitOps‑репозиторію створюється **GitHub deploy key (read‑only)**. Додатково, GitHub Actions‑workflow може **запустити Flux bootstrap** через CLI після готовності кластера.
 
-> **Поточний репозиторій:** `gke-iac` (root IaC)
+> **Поточний репозиторій:** `gke-iac-standard` (root IaC)
 >
 > **Пов’язаний GitOps‑репо (маніфести + SOPS/Flux):** `mexxo-dvp/gitops` (споживається Flux після bootstrap)
 
@@ -15,12 +15,12 @@
 
 1. **VPC і підмережа** (VPC‑native):
 
-   * VPC: `gke-vpc`
-   * Subnet: `gke-subnet` (`10.10.0.0/20`)
+   * VPC: `gke-vpc-std`
+   * Subnet: `gke-subnet-std` (`10.60.0.0/20`)
    * Вторинні діапазони:
 
-     * Pods   → `gke-pods` = `10.20.0.0/14`
-     * Svcs   → `gke-services` = `10.40.0.0/20`
+     * Pods   → `gke-pods-std` = `10.80.0.0/14`
+     * Svcs   → `gke-services-std` = `10.100.0.0/20`
 2. **Кластер GKE Autopilot** (регіональний; `release_channel = STABLE`) з **Workload Identity**:
 
    * Назва кластера → `var.cluster_name` (за замовчуванням `gke-flux`)
@@ -40,7 +40,7 @@
 
 ```
 .
-├─ main.tf                  # VPC/Subnet + GKE Autopilot + kubeconfig + GH deploy key
+├─ main.tf                  # VPC/Subnet + GKE Standard + kubeconfig + GH deploy key
 ├─ providers.tf             # провайдери: google, google-beta, github, local, tls
 ├─ versions.tf              # обмеження версій Terraform та провайдерів
 ├─ variables.tf             # вхідні змінні (project/region/zone/тощо)

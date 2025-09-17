@@ -45,45 +45,79 @@ jobs:
         with:
           terraform_version: "1.8.5"
 
-      - name: Terraform Plan/Apply
+      - name: Terraform (create cluster & node pool first)
+        if: ${{ inputs.apply == true }}
         env:
-          # GitHub provider needs PAT with scopes: repo + admin:public_key
-          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
+          # GitHub provider (PAT)
+          GITHUB_TOKEN:                 ${{ secrets.GH_TOKEN }}
+          # TF vars
+          TF_VAR_project:               ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:                ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:                  ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name:          gke-flux-std
+          TF_VAR_github_owner:          mexxo-dvp
+          TF_VAR_github_repo:           gitops
+          TF_VAR_github_token:          ${{ secrets.GH_TOKEN }}   # explicit for provider
+          TF_VAR_flux_path:             clusters/gke
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform init -input=false
+          # step 1: create only GKE resources so auth-module doesn't fail
+          terraform apply -input=false -auto-approve \
+            -target=google_container_cluster.this \
+            -target=google_container_node_pool.default
 
-          # TF variables
+      - name: Terraform (full apply incl. kubeconfig output)
+        if: ${{ inputs.apply == true }}
+        env:
+          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
           TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
           TF_VAR_region:       ${{ secrets.GCP_REGION }}
           TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name: gke-flux
-
-          # For github provider/module inputs used by your TF
+          TF_VAR_cluster_name: gke-flux-std
           TF_VAR_github_owner: mexxo-dvp
           TF_VAR_github_repo:  gitops
+          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
           TF_VAR_flux_path:    clusters/gke
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ inputs.apply }}" = "true" ]; then
-            terraform init -input=false
-            terraform apply -input=false -auto-approve
-          else
-            terraform init -backend=false -input=false
-            terraform validate
-            terraform plan -no-color -input=false
-          fi
+          terraform apply -input=false -auto-approve
+
+      - name: Terraform plan only (no changes)
+        if: ${{ inputs.apply == false }}
+        env:
+          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
+          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
+          TF_VAR_region:       ${{ secrets.GCP_REGION }}
+          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
+          TF_VAR_cluster_name: gke-flux-std
+          TF_VAR_github_owner: mexxo-dvp
+          TF_VAR_github_repo:  gitops
+          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
+          TF_VAR_flux_path:    clusters/gke
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform init -input=false
+          # plan only on GKE targets to avoid data-source failures
+          terraform plan -no-color -input=false \
+            -target=google_container_cluster.this \
+            -target=google_container_node_pool.default
 
       - name: Flux bootstrap (CLI)
         if: ${{ inputs.bootstrap == true && inputs.apply == true }}
         env:
           GITHUB_TOKEN:   ${{ secrets.GH_TOKEN }}
           GOOGLE_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
-          GOOGLE_REGION:  ${{ secrets.GCP_REGION }}
-          CLUSTER_NAME:   gke-flux
+          GOOGLE_ZONE:    ${{ secrets.GCP_ZONE }}
+          CLUSTER_NAME:   gke-flux-std
         shell: bash
         run: |
           set -euo pipefail
-          # kube-context
-          gcloud container clusters get-credentials "$CLUSTER_NAME" --region "$GOOGLE_REGION" --project "$GOOGLE_PROJECT"
+          # kube-context for ZONAL cluster
+          gcloud container clusters get-credentials "$CLUSTER_NAME" --zone "$GOOGLE_ZONE" --project "$GOOGLE_PROJECT"
 
           # flux cli
           curl -s https://fluxcd.io/install.sh | sudo bash
