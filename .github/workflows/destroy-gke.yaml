@@ -1,13 +1,7 @@
-name: Destroy GKE
+name: Destroy GKE (NUKE)
 
 on:
-  workflow_dispatch:
-    inputs:
-      destroy_all:
-        description: "Destroy ALL TF resources (VPC/Subnet/etc.)? Default false = only cluster + node pool."
-        required: true
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -21,86 +15,48 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_IN_AUTOMATION: "1"
+      # Імена з твоєї інфи:
       CLUSTER_NAME: gke-flux-std
+      VPC_NAME: gke-vpc-std
+      SUBNET_NAME: gke-subnet-std
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: google-github-actions/auth@v2
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
           export_environment_variables: true
 
-      - uses: google-github-actions/setup-gcloud@v2
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
         with:
           install_components: gke-gcloud-auth-plugin
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.8.5"
-
-      - name: Clear stale Terraform lock (best-effort)
+      - name: "Clear stale TF lock (best-effort)"
         shell: bash
         run: |
           set -euo pipefail
           BUCKET=$(grep -E 'bucket *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/')
           PREFIX=$(grep -E 'prefix *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/' || true)
-          if [[ -n "${PREFIX:-}" ]]; then
-            LOCK_PATH="gs://${BUCKET}/${PREFIX}/default.tflock"
-          else
-            LOCK_PATH="gs://${BUCKET}/default.tflock"
-          fi
+          LOCK_PATH="gs://${BUCKET}/${PREFIX:+$PREFIX/}default.tflock"
           gsutil rm -f "${LOCK_PATH}" || true
 
-      - name: "Terraform Destroy (targeted: cluster + node pool)"
-        if: ${{ inputs.destroy_all == false }}
+      - name: "Nuke: GKE cluster (zonal + autodetect fallback)"
+        shell: bash
         env:
-          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:       ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name: ${{ env.CLUSTER_NAME }}
-          TF_VAR_github_owner: mexxo-dvp
-          TF_VAR_github_repo:  gitops
-          TF_VAR_flux_path:    clusters/gke
-          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
-          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
-        run: |
-          set -euo pipefail
-          terraform init -input=false
-          terraform destroy -input=false -lock-timeout=10m -auto-approve \
-            -target=google_container_node_pool.default \
-            -target=google_container_cluster.this
-          terraform state rm local_file.kubeconfig || true
-          terraform state rm module.gke_auth_self || true
-
-      - name: Terraform Destroy (full stack)
-        if: ${{ inputs.destroy_all == true }}
-        env:
-          TF_VAR_project:      ${{ secrets.GCP_PROJECT_ID }}
-          TF_VAR_region:       ${{ secrets.GCP_REGION }}
-          TF_VAR_zone:         ${{ secrets.GCP_ZONE }}
-          TF_VAR_cluster_name: ${{ env.CLUSTER_NAME }}
-          TF_VAR_github_owner: mexxo-dvp
-          TF_VAR_github_repo:  gitops
-          TF_VAR_flux_path:    clusters/gke
-          TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
-          GITHUB_TOKEN:        ${{ secrets.GH_TOKEN }}
-        run: |
-          set -euo pipefail
-          terraform init -input=false
-          terraform destroy -input=false -lock-timeout=10m -auto-approve
-
-      - name: Legacy cleanup (detect location, gcloud delete)
-        if: ${{ failure() && inputs.destroy_all == false }}
-        env:
-          PROJECT_ID:   ${{ secrets.GCP_PROJECT_ID }}
-          CLUSTER_NAME: ${{ env.CLUSTER_NAME }}
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          ZONE:       ${{ secrets.GCP_ZONE }}
         run: |
           set -euxo pipefail
+
+          gcloud container clusters delete "$CLUSTER_NAME" \
+            --zone "$ZONE" --project "$PROJECT_ID" --quiet || true
+
           LOC=$(gcloud container clusters list --project "$PROJECT_ID" \
                  --filter="name=$CLUSTER_NAME" --format="value(location)" | head -n1 || true)
-          echo "Detected cluster location: ${LOC:-<none>}"
           if [[ -n "${LOC:-}" ]]; then
             if [[ "$LOC" =~ -[a-z]$ ]]; then
               gcloud container clusters delete "$CLUSTER_NAME" --zone "$LOC" --project "$PROJECT_ID" --quiet || true
@@ -108,3 +64,44 @@ jobs:
               gcloud container clusters delete "$CLUSTER_NAME" --region "$LOC" --project "$PROJECT_ID" --quiet || true
             fi
           fi
+
+      - name: "Nuke: Subnet then VPC"
+        shell: bash
+        env:
+          PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          REGION:     ${{ secrets.GCP_REGION }}
+        run: |
+          set -euxo pipefail
+          # subnet → потім VPC (idempotent)
+          gcloud compute networks subnets delete "$SUBNET_NAME" \
+            --region "$REGION" --project "$PROJECT_ID" --quiet || true
+          gcloud compute networks delete "$VPC_NAME" \
+            --project "$PROJECT_ID" --quiet || true
+
+      - name: "Nuke: remove GitHub deploy key (flux-readonly-gke)"
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          OWNER:        mexxo-dvp
+          REPO:         gitops
+        run: |
+          set -euxo pipefail
+          ids=$(gh api repos/$OWNER/$REPO/keys --jq '.[] | select(.title=="flux-readonly-gke") | .id' || true)
+          if [[ -n "${ids:-}" ]]; then
+            for id in $ids; do
+              gh api -X DELETE repos/$OWNER/$REPO/keys/$id || true
+            done
+          fi
+
+      - name: "Wipe Terraform backend state"
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BUCKET=$(grep -E 'bucket *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/')
+          PREFIX=$(grep -E 'prefix *= *"' backend.tf | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Wiping gs://${BUCKET}/${PREFIX}/"
+          gsutil -m rm -r "gs://${BUCKET}/${PREFIX}/**" || true
+          gsutil rm -f "gs://${BUCKET}/${PREFIX}/default.tflock" || true
+
+      - name: "Done"
+        run: echo "Full wipe completed."
